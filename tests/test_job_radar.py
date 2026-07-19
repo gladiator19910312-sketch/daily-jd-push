@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import radar_matching
 from job_radar import (
     Job,
     assess_job,
@@ -16,7 +17,10 @@ from job_radar import (
     load_seen_state,
     looks_like_product_job,
     parse_ashby,
+    parse_alibaba,
+    parse_bytedance,
     parse_greenhouse,
+    parse_meituan,
     parse_moka,
     parse_rss,
     parse_salary,
@@ -35,7 +39,9 @@ from job_radar import (
     was_seen,
 )
 from radar_market import job_freshness, location_bucket, parse_timestamp
-from radar_trends import discover_trend_signals, signal_is_recent
+from radar_ats import parse_lever
+from radar_discovery import fetch_official_source
+from radar_trends import discover_trend_signals, signal_is_recent, signal_is_relevant
 from radar_types import TrendSignal, normalize_url
 
 
@@ -124,6 +130,59 @@ class JobRadarTests(unittest.TestCase):
         self.assertEqual(selected, [xiaohongshu])
         self.assertEqual(signals_to_baseline([wechat, xiaohongshu], selected), [xiaohongshu])
 
+    def test_signal_selection_uses_independent_platform_and_content_quotas(self):
+        observed = "2026-07-19T04:00:00+00:00"
+        platform = [
+            TrendSignal(
+                f"AI Agent 产品负责人 {index}",
+                f"https://www.zhipin.com/job_detail/{index}.html",
+                "高级社招岗位",
+                f"平台-{index}",
+                "platform",
+                observed,
+            )
+            for index in range(5)
+        ]
+        content = [
+            TrendSignal(
+                f"AI 人才报告 {index}",
+                f"https://mp.weixin.qq.com/s?__biz=a&mid={index}&idx=1&sn=x",
+                "Agent 产品招聘趋势",
+                f"内容-{index}",
+                "content",
+                observed,
+            )
+            for index in range(3)
+        ]
+        selected = select_signals(
+            [*platform, *content],
+            5,
+            platform_limit=3,
+            content_limit=2,
+        )
+        self.assertEqual([signal.kind for signal in selected], ["platform"] * 3 + ["content"] * 2)
+
+    def test_platform_signal_relevance_rejects_campus_and_intern_roles(self):
+        observed = "2026-07-19T04:00:00+00:00"
+        campus = TrendSignal(
+            "2027届 AI Agent 产品经理校招",
+            "https://jobs.bytedance.com/campus/position/42/detail",
+            "校园招聘岗位",
+            "平台",
+            "platform",
+            observed,
+        )
+        social = TrendSignal(
+            "高级 AI Agent 产品负责人",
+            "https://example.com/social/42",
+            "社招岗位，负责评测与产品闭环",
+            "平台",
+            "platform",
+            observed,
+        )
+        self.assertFalse(signal_is_relevant(campus))
+        self.assertTrue(signal_is_relevant(social))
+
     def test_parse_chinese_monthly_salary(self):
         salary = parse_salary("AI座舱产品经理 50-80K·20薪")
         self.assertEqual(salary.total_high_wan, 160.0)
@@ -168,6 +227,148 @@ class JobRadarTests(unittest.TestCase):
     def test_product_role_title_is_a_job_candidate(self):
         job = Job("Agent Evals 产品经理 - DeepSeek", "https://example.com/job", "", "test")
         self.assertTrue(looks_like_product_job(job))
+
+    def test_agent_product_intern_is_excluded_from_social_recruitment(self):
+        job = Job(
+            "Agent产品经理实习生",
+            "https://example.com/jobs/intern",
+            "负责 Agent 评测、Benchmark、安全和端到端产品闭环。",
+            "test",
+        )
+        self.assertFalse(assess_job(job, CONFIG).eligible)
+        self.assertFalse(radar_matching.looks_like_candidate_job(job))
+
+    def test_2027_graduate_role_is_excluded_from_social_recruitment(self):
+        job = Job(
+            "Agent 产品经理",
+            "https://example.com/jobs/2027-campus",
+            "面向2027届应届毕业生的校园招聘，负责智能体评测与 Benchmark。",
+            "test",
+        )
+        self.assertFalse(assess_job(job, CONFIG).eligible)
+        self.assertFalse(radar_matching.looks_like_candidate_job(job))
+
+    def test_new_grad_role_is_excluded_from_social_recruitment(self):
+        job = Job(
+            "Product Manager, Agent Evaluation - New Grad",
+            "https://example.com/jobs/new-grad",
+            "Own agent evals, reliability, safety, and product outcomes.",
+            "test",
+        )
+        self.assertFalse(assess_job(job, CONFIG).eligible)
+        self.assertFalse(radar_matching.looks_like_candidate_job(job))
+
+    def test_english_early_career_title_variants_are_excluded(self):
+        titles = (
+            "Product Manager, Agent Evaluation - Early Career",
+            "University Graduate Product Manager, AI Agent",
+            "2026 Graduate Product Manager, Agent Platform",
+            "Management Trainee, AI Product",
+        )
+        for title in titles:
+            with self.subTest(title=title):
+                job = Job(
+                    title,
+                    "https://example.com/jobs/early-career",
+                    "Own agent evals, reliability, safety, and product outcomes.",
+                    "test",
+                )
+                self.assertFalse(radar_matching.looks_like_candidate_job(job))
+
+    def test_graduate_degree_requirement_is_not_misclassified_as_campus_hiring(self):
+        job = Job(
+            "Senior Product Manager, Agent Evaluation",
+            "https://example.com/jobs/graduate-degree",
+            "Graduate degree required. Own agent evals, reliability, and product outcomes.",
+            "test",
+        )
+        self.assertTrue(assess_job(job, CONFIG).eligible)
+        self.assertTrue(radar_matching.looks_like_candidate_job(job))
+
+    def test_nonstandard_senior_ai_owner_titles_enter_broad_recall(self):
+        jobs = [
+            Job(
+                "AI应用与智能体业务负责人",
+                "https://example.com/jobs/ai-owner",
+                "负责 Agent 产品路线、评测、安全和业务闭环。",
+                "test",
+            ),
+            Job(
+                "Head of Agent Evaluation",
+                "https://example.com/jobs/eval-head",
+                "Own product roadmap, benchmark quality, reliability, and business outcomes.",
+                "test",
+            ),
+            Job(
+                "模型质量负责人",
+                "https://example.com/jobs/model-quality-owner",
+                "负责大模型 Agent 评测、Benchmark、失败归因与可靠性。",
+                "test",
+            ),
+        ]
+        for job in jobs:
+            with self.subTest(title=job.title):
+                self.assertTrue(radar_matching.looks_like_candidate_job(job))
+
+    def test_pure_engineering_role_is_rejected_from_broad_recall(self):
+        for title in ("Agent 平台算法工程师", "混元 Agent 评测 Infra 工程专家"):
+            with self.subTest(title=title):
+                job = Job(
+                    title,
+                    "https://example.com/jobs/agent-engineer",
+                    "负责 Agent 训练、推理服务、模型部署与工程稳定性。",
+                    "test",
+                )
+                self.assertFalse(radar_matching.looks_like_candidate_job(job))
+                self.assertFalse(assess_job(job, CONFIG).eligible)
+
+    def test_ai_product_owner_is_recognized_as_target_title(self):
+        job = Job(
+            "AI产品负责人",
+            "https://example.com/jobs/ai-product-owner",
+            "负责 Agent 路线、评测标准与产品闭环。",
+            "test",
+        )
+        self.assertTrue(radar_matching.has_target_title(job.title))
+        self.assertTrue(radar_matching.looks_like_candidate_job(job))
+
+    def test_undisclosed_salary_does_not_exclude_high_fit_role(self):
+        job = Job(
+            "Senior Product Manager, Agent Evals",
+            "https://example.com/jobs/salary-undisclosed",
+            "Own agent benchmarks, safety, reliability, roadmap, and business outcomes.",
+            "test",
+        )
+        result = assess_job(job, CONFIG)
+        self.assertEqual(result.salary.label, "未披露")
+        self.assertIn("薪酬未披露", result.salary_gate)
+        self.assertTrue(result.eligible)
+
+    def test_nonpreferred_startup_can_still_be_assessed_and_ranked(self):
+        config = {
+            **CONFIG,
+            "fit_threshold": 72,
+            "ready_threshold": 48,
+            "global_fit_threshold": 80,
+            "require_official_source": True,
+        }
+        job = Job(
+            "Agent 评测产品负责人",
+            "https://careers.example-startup.com/jobs/agent-evals",
+            "端到端负责 Agent Benchmark、失败归因、安全、可靠性与业务结果。",
+            "星火智能官方",
+            location="北京",
+            scope="china",
+            official=True,
+            company="星火智能",
+            published_at="2026-07-01",
+            date_basis="published",
+            active=True,
+        )
+        assessment = assess_job(job, config)
+        ranked = radar_matching.rank_assessments([assessment], config)
+        self.assertTrue(assessment.eligible)
+        self.assertEqual(ranked, [assessment])
 
     def test_fde_is_excluded(self):
         job = Job(
@@ -376,6 +577,46 @@ class JobRadarTests(unittest.TestCase):
         self.assertIn("$220K - $280K", jobs[0].summary)
         self.assertEqual(jobs[0].date_basis, "published")
 
+    def test_hosted_ats_parsers_reject_external_urls_marked_as_official(self):
+        greenhouse = json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": 1,
+                        "title": "Agent Product Manager",
+                        "absolute_url": "https://evil.example/phish",
+                        "content": "Own Agent evals and product outcomes.",
+                    }
+                ]
+            }
+        ).encode()
+        ashby = json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "1",
+                        "isListed": True,
+                        "title": "Agent Product Manager",
+                        "jobUrl": "https://evil.example/phish",
+                        "descriptionPlain": "Own Agent evals and product outcomes.",
+                    }
+                ]
+            }
+        ).encode()
+        lever = json.dumps(
+            [
+                {
+                    "id": "1",
+                    "text": "Agent Product Manager",
+                    "hostedUrl": "https://evil.example/phish",
+                    "descriptionPlain": "Own Agent evals and product outcomes.",
+                }
+            ]
+        ).encode()
+        self.assertEqual(parse_greenhouse(greenhouse, {"name": "Acme"}), [])
+        self.assertEqual(parse_ashby(ashby, {"name": "Acme"}), [])
+        self.assertEqual(parse_lever(lever, {"name": "Acme"}), [])
+
     def test_parse_moka_builds_job_url_and_location(self):
         payload = json.dumps(
             {
@@ -404,6 +645,190 @@ class JobRadarTests(unittest.TestCase):
         self.assertEqual(jobs[0].location, "中国·北京·海淀区")
         self.assertEqual(jobs[0].date_basis, "published")
 
+    def test_parse_bytedance_keeps_social_role_and_published_date(self):
+        payload = json.dumps(
+            {
+                "code": 0,
+                "data": {
+                    "job_post_list": [
+                        {
+                            "id": "byte-1",
+                            "title": "抖音电商创意 Agent 产品负责人",
+                            "description": "定义 Agent 产品路线与真实任务闭环",
+                            "requirement": "5年以上产品经验，熟悉评测与多模态",
+                            "city_info": {"name": "北京"},
+                            "recruit_type": {"parent": {"id": "1", "name": "社招"}},
+                            "publish_time": 1783989886449,
+                            "job_post_info": {"expiry_time": 0},
+                        },
+                        {
+                            "id": "campus",
+                            "title": "Agent 产品经理",
+                            "description": "校园招聘",
+                            "recruit_type": {"parent": {"id": "2", "name": "校招"}},
+                        },
+                    ],
+                    "count": 2,
+                },
+            }
+        ).encode()
+        jobs, total = parse_bytedance(
+            payload,
+            {"name": "字节跳动官方社招", "key": "bytedance:official-social", "scope": "china"},
+        )
+        self.assertEqual(total, 2)
+        self.assertEqual([job.job_id for job in jobs], ["byte-1"])
+        self.assertEqual(jobs[0].location, "北京")
+        self.assertEqual(jobs[0].date_basis, "published")
+        self.assertEqual(jobs[0].valid_through, "")
+        self.assertIn("/experienced/position/byte-1/detail", jobs[0].url)
+
+    def test_parse_alibaba_uses_official_detail_url_and_publish_time(self):
+        payload = json.dumps(
+            {
+                "success": True,
+                "content": {
+                    "datas": [
+                        {
+                            "id": 42,
+                            "positionUrl": "/off-campus/position-detail?positionId=42&track_id=x",
+                            "name": "千问 Agent 产品经理",
+                            "publishTime": 1783067494000,
+                            "modifyTime": 1784000000000,
+                            "workLocations": ["北京"],
+                            "requirement": "5年以上产品经验",
+                            "description": "建设 Agent 评测、工具调用与产品闭环",
+                            "experience": {"from": 5, "to": None},
+                        }
+                    ],
+                    "totalCount": 1,
+                },
+            }
+        ).encode()
+        jobs, total = parse_alibaba(
+            payload,
+            {"name": "阿里巴巴官方社招", "key": "alibaba:official-social", "scope": "china"},
+        )
+        self.assertEqual(total, 1)
+        self.assertEqual(jobs[0].location, "北京")
+        self.assertEqual(jobs[0].date_basis, "published")
+        self.assertIn("talent.alibaba.com/off-campus/position-detail", jobs[0].url)
+
+    def test_parse_alibaba_rejects_external_position_url(self):
+        payload = json.dumps(
+            {
+                "success": True,
+                "content": {
+                    "datas": [
+                        {
+                            "id": 42,
+                            "positionUrl": "https://evil.example/off-campus/position-detail?id=42",
+                            "name": "Agent 产品负责人",
+                            "workLocations": ["北京"],
+                            "description": "负责 Agent 评测与产品闭环",
+                        }
+                    ],
+                    "totalCount": 1,
+                },
+            }
+        ).encode()
+        jobs, total = parse_alibaba(
+            payload,
+            {"name": "阿里巴巴官方社招", "key": "alibaba:official-social"},
+        )
+        self.assertEqual(total, 1)
+        self.assertEqual(jobs, [])
+
+    def test_parse_meituan_keeps_only_open_senior_social_candidates(self):
+        payload = json.dumps(
+            {
+                "status": 1,
+                "data": {
+                    "list": [
+                        {
+                            "jobUnionId": "3939735042",
+                            "name": "AI产品经理-小美Agent方向",
+                            "jobStatus": "000",
+                            "cityList": [{"name": "北京市"}],
+                            "jobDuty": "建设 Agent 评测集、Judge LLM 与失败归因闭环",
+                            "jobRequirement": "5年产品经验，能独立负责完整复杂项目",
+                            "refreshTime": 1784426445000,
+                        },
+                        {
+                            "jobUnionId": "intern",
+                            "name": "AI Agent 产品实习生",
+                            "jobStatus": "000",
+                            "cityList": [{"name": "北京市"}],
+                            "jobDuty": "Agent 产品实习",
+                        },
+                        {
+                            "jobUnionId": "closed",
+                            "name": "Agent 产品负责人",
+                            "jobStatus": "999",
+                        },
+                    ],
+                    "page": {"totalCount": 3},
+                },
+            }
+        ).encode()
+        jobs, total = parse_meituan(
+            payload,
+            {"name": "美团官方社招", "key": "meituan:official-social", "scope": "china"},
+        )
+        self.assertEqual(total, 3)
+        self.assertEqual([job.job_id for job in jobs], ["3939735042"])
+        self.assertEqual(jobs[0].location, "北京市")
+        self.assertEqual(jobs[0].date_basis, "unknown")
+        self.assertTrue(jobs[0].official)
+        self.assertIn("highlightType=social", jobs[0].url)
+
+    @patch("radar_discovery.http_post_json")
+    def test_meituan_confirmed_closed_detail_is_not_revived_from_list(self, mock_post):
+        list_payload = json.dumps(
+            {
+                "status": 1,
+                "data": {
+                    "list": [
+                        {
+                            "jobUnionId": "42",
+                            "name": "AI Agent 产品负责人",
+                            "jobStatus": "000",
+                            "jobType": "3",
+                            "cityList": [{"name": "北京市"}],
+                            "jobDuty": "负责 Agent 评测与产品闭环",
+                        }
+                    ],
+                    "page": {"totalCount": 1},
+                },
+            }
+        ).encode()
+        closed_detail = json.dumps(
+            {
+                "status": 1,
+                "data": {
+                    "jobUnionId": "42",
+                    "name": "AI Agent 产品负责人",
+                    "jobStatus": "999",
+                    "jobType": "3",
+                },
+            }
+        ).encode()
+        mock_post.side_effect = [list_payload, closed_detail]
+        jobs = fetch_official_source(
+            {
+                "type": "meituan",
+                "name": "美团官方社招",
+                "key": "meituan:official-social",
+                "url": "https://zhaopin.meituan.com/api/official/job/getJobList",
+                "detail_url": "https://zhaopin.meituan.com/api/official/job/getJobDetail",
+                "keywords": ["Agent 产品"],
+                "page_size": 30,
+                "max_pages_per_keyword": 1,
+                "max_detail_fetches": 1,
+            }
+        )
+        self.assertEqual(jobs, [])
+
     def test_parse_tencent_keeps_official_update_and_beijing_location(self):
         payload = json.dumps(
             {
@@ -430,6 +855,90 @@ class JobRadarTests(unittest.TestCase):
         self.assertEqual(jobs[0].date_basis, "updated")
         self.assertEqual(jobs[0].published_at, "2026-07-17T00:00:00+00:00")
         self.assertTrue(jobs[0].url.startswith("https://careers.tencent.com/"))
+
+    def test_parse_tencent_rejects_invalid_and_external_url_posts(self):
+        payload = json.dumps(
+            {
+                "Code": 200,
+                "Data": {
+                    "Count": 2,
+                    "Posts": [
+                        {
+                            "PostId": "closed",
+                            "RecruitPostName": "Agent 产品负责人",
+                            "PostURL": "jobdesc.html?postId=closed",
+                            "IsValid": False,
+                        },
+                        {
+                            "PostId": "external",
+                            "RecruitPostName": "Agent 产品负责人",
+                            "PostURL": "https://evil.example/jobdesc.html?postId=external",
+                            "IsValid": True,
+                        },
+                    ],
+                },
+            }
+        ).encode()
+        jobs, total = parse_tencent(
+            payload,
+            {"name": "腾讯官方招聘", "key": "tencent:official"},
+        )
+        self.assertEqual(total, 2)
+        self.assertEqual(jobs, [])
+
+    @patch("radar_discovery.http_get")
+    def test_tencent_keyword_failure_keeps_results_from_other_keywords(self, mock_get):
+        valid = json.dumps(
+            {
+                "Code": 200,
+                "Data": {
+                    "Count": 1,
+                    "Posts": [
+                        {
+                            "PostId": "42",
+                            "RecruitPostName": "大模型评测产品经理",
+                            "LocationName": "北京",
+                            "Responsibility": "建设 Agent 自动评测与 Benchmark",
+                            "LastUpdateTime": "2026年07月17日",
+                        }
+                    ],
+                },
+            }
+        ).encode()
+        mock_get.side_effect = [valid, b"{}"]
+        warnings = []
+        jobs = fetch_official_source(
+            {
+                "type": "tencent",
+                "name": "腾讯官方招聘",
+                "key": "tencent:official",
+                "url_template": "https://careers.tencent.com/api?q={keyword}&p={page}&n={page_size}",
+                "keywords": ["评测", "模型质量"],
+                "page_size": 100,
+            },
+            warnings=warnings,
+        )
+        self.assertEqual([job.job_id for job in jobs], ["42"])
+        self.assertIn("部分关键词请求失败", warnings[0])
+
+    @patch("radar_discovery.http_get")
+    @patch("radar_discovery.time.monotonic", side_effect=[0.0, 6.0, 6.0])
+    def test_official_source_budget_stops_pagination_before_network_call(
+        self,
+        _mock_clock,
+        mock_get,
+    ):
+        jobs = fetch_official_source(
+            {
+                "type": "moka",
+                "name": "测试官方",
+                "url": "https://api.mokahr.com/jobs",
+                "job_url_template": "https://app.mokahr.com/job/{id}",
+            },
+            max_seconds=5,
+        )
+        self.assertEqual(jobs, [])
+        mock_get.assert_not_called()
 
     def test_eval_product_title_beats_adjacent_data_strategy_role(self):
         eval_role = assess_job(
@@ -466,6 +975,16 @@ class JobRadarTests(unittest.TestCase):
             "ashby:acme",
         )
         self.assertIs(enrich_jobs([job], 10)[0], job)
+
+    def test_public_platforms_are_not_configured_as_employer_official_hosts(self):
+        config_path = Path(__file__).resolve().parents[1] / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        employer_hosts = set(config["employer_career_hosts"])
+        self.assertIn("jobs.bytedance.com", employer_hosts)
+        self.assertIn("zhaopin.meituan.com", employer_hosts)
+        self.assertNotIn("jobonline.cn", employer_hosts)
+        self.assertNotIn("job.iguopin.com", employer_hosts)
+        self.assertNotIn("job.mohrss.gov.cn", employer_hosts)
 
     @patch("radar_discovery.http_get")
     def test_enrichment_rejects_soft_404_without_jobposting_schema(self, mock_get):
@@ -536,6 +1055,29 @@ class JobRadarTests(unittest.TestCase):
         report = format_report([], 0, [], signals=[signal], config=CONFIG)
         self.assertIn("报告\\]", report)
         self.assertEqual(report.count("](https://"), 1)
+
+    def test_report_separates_platform_leads_from_industry_content(self):
+        observed = "2026-07-19T04:00:00+00:00"
+        platform = TrendSignal(
+            "高级 AI Agent 产品负责人",
+            "https://job.iguopin.com/job/detail?id=42",
+            "北京社招岗位",
+            "国聘",
+            "platform",
+            observed,
+        )
+        content = TrendSignal(
+            "AI 人才招聘报告",
+            "https://mp.weixin.qq.com/s?__biz=a&mid=2&idx=1&sn=x",
+            "Agent 产品招聘趋势",
+            "公众号",
+            "content",
+            observed,
+        )
+        report = format_report([], 0, [], signals=[platform, content], config=CONFIG)
+        self.assertIn("社招高阶线索｜招聘平台 / 公共就业 / 人才网", report)
+        self.assertIn("行业报告 / 公众号 / 小红书｜趋势参考", report)
+        self.assertIn("不等同于企业官网在招", report)
 
     def test_url_normalization_is_host_aware_and_stable(self):
         xhs_one = "https://www.xiaohongshu.com/explore/abc?xsec_token=one&xsec_source=pc"

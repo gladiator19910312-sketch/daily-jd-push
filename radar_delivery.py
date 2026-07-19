@@ -116,7 +116,12 @@ def format_report(
     signals = signals or []
     timezone = ZoneInfo(str(config.get("timezone", "Asia/Shanghai")))
     now = datetime.now(timezone)
-    lines = [f"## Sunny 每日 Agent 岗位雷达｜{now:%Y-%m-%d}", "", "## 北京 / 天津｜可行动岗位", ""]
+    lines = [
+        f"## Sunny 每日 Agent 岗位雷达｜{now:%Y-%m-%d}",
+        "",
+        "## 北京 / 天津｜社招优先可行动岗位",
+        "",
+    ]
     if not items:
         lines.extend(["今天没有发现新的、通过时效与职业红线的北京/天津岗位。", ""])
     for index, item in enumerate(items, 1):
@@ -148,14 +153,21 @@ def format_report(
             )
         lines.append("")
 
-    lines.extend(["## 招聘平台 / 公众号 / 小红书｜市场信号", ""])
-    if signals:
-        for signal in signals:
+    platform_signals = [signal for signal in signals if signal.kind == "platform"]
+    content_signals = [signal for signal in signals if signal.kind != "platform"]
+    lines.extend(["## 社招高阶线索｜招聘平台 / 公共就业 / 人才网", ""])
+    if platform_signals:
+        lines.extend(
+            [
+                "以下为公开索引线索，不等同于企业官网在招；投递前需回企业招聘页或联系招聘方二次验活。",
+                "",
+            ]
+        )
+        for signal in platform_signals:
             indexed = parse_timestamp(signal.indexed_at)
             indexed_label = indexed.date().isoformat() if indexed else "发现日期未知"
-            kind = "岗位线索" if signal.kind == "platform" else "职场/行业内容"
             lines.append(
-                f"- {markdown_link(signal.title, signal.url)}｜{markdown_text(signal.source)}｜{kind}｜"
+                f"- {markdown_link(signal.title, signal.url)}｜{markdown_text(signal.source)}｜社招岗位线索｜"
                 f"本次发现 {indexed_label}，原文日期待核验｜{markdown_text(signal_excerpt(signal))}"
             )
         lines.append("")
@@ -166,6 +178,19 @@ def format_report(
                 "",
             ]
         )
+
+    lines.extend(["## 行业报告 / 公众号 / 小红书｜趋势参考", ""])
+    if content_signals:
+        for signal in content_signals:
+            indexed = parse_timestamp(signal.indexed_at)
+            indexed_label = indexed.date().isoformat() if indexed else "发现日期未知"
+            lines.append(
+                f"- {markdown_link(signal.title, signal.url)}｜{markdown_text(signal.source)}｜"
+                f"本次发现 {indexed_label}，原文日期待核验｜{markdown_text(signal_excerpt(signal))}"
+            )
+        lines.append("")
+    else:
+        lines.extend(["本轮没有新的、可公开验证的行业内容信号。", ""])
 
     themes = Counter(
         responsibility
@@ -183,11 +208,13 @@ def format_report(
     )
     if failures:
         lines.append(
-            f"部分来源无结果或失败：{'；'.join(markdown_text(value) for value in failures[:3])}。"
+            f"部分来源无结果或失败（共 {len(failures)} 项）："
+            f"{'；'.join(markdown_text(value) for value in failures[:3])}。"
             "其他来源继续独立执行。"
         )
     lines.append(
-        "BOSS、猎聘、51job、智联、就业在线、Indeed、LinkedIn、公众号和小红书只作公开索引发现；"
+        "BOSS、猎聘、脉脉、51job、智联、国聘、就业在线、各地人才网、Indeed、LinkedIn、"
+        "公众号和小红书只作公开索引发现；"
         "未回到企业官网验活的内容不会被当作可申请岗位。"
     )
     lines.append("薪酬、双休、21点后工作频率和差旅以招聘方书面确认及面试反向背调为准。")

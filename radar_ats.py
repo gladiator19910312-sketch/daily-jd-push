@@ -9,8 +9,12 @@ import urllib.parse
 from typing import Any, Iterable
 
 from radar_market import parse_timestamp
-from radar_matching import looks_like_product_job
+from radar_matching import looks_like_candidate_job
 from radar_types import Job, is_public_http_url
+
+
+class ClosedJobError(ValueError):
+    """The employer detail endpoint confirms a listing is closed or out of scope."""
 
 
 def strip_html(value: str) -> str:
@@ -32,12 +36,141 @@ def compact_location(parts: Iterable[Any]) -> str:
 
 
 def timestamp_text(value: Any) -> str:
+    if value in (None, "", 0, "0"):
+        return ""
     parsed = parse_timestamp(value)
     return parsed.isoformat() if parsed else str(value or "").strip()
 
 
 def source_company(source: dict[str, Any]) -> str:
     return str(source.get("company") or source["name"]).replace("官方", "").strip()
+
+
+def official_job_url_allowed(
+    value: str,
+    source: dict[str, Any],
+    default_hosts: Iterable[str],
+) -> bool:
+    """Keep an ATS payload from assigning employer trust to an arbitrary external URL."""
+    if not is_public_http_url(value):
+        return False
+    parsed = urllib.parse.urlsplit(value)
+    configured = source.get("allowed_job_hosts") or default_hosts
+    if isinstance(configured, str):
+        configured = (configured,)
+    allowed_hosts = {str(host).casefold() for host in configured}
+    return parsed.scheme == "https" and (parsed.hostname or "").casefold() in allowed_hosts
+
+
+def parse_bytedance(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], int]:
+    data = json_object(payload)
+    result = data.get("data")
+    if data.get("code") != 0 or not isinstance(result, dict):
+        raise ValueError("ByteDance response is not successful")
+    raw_jobs = result.get("job_post_list")
+    if not isinstance(raw_jobs, list):
+        raise ValueError("ByteDance response has no jobs list")
+    jobs: list[Job] = []
+    for raw in raw_jobs:
+        if not isinstance(raw, dict):
+            continue
+        recruit_type = raw.get("recruit_type") if isinstance(raw.get("recruit_type"), dict) else {}
+        parent = recruit_type.get("parent") if isinstance(recruit_type.get("parent"), dict) else {}
+        if parent and str(parent.get("id") or "") != "1":
+            continue
+        job_id = str(raw.get("id") or raw.get("code") or "")
+        city_info = raw.get("city_info") if isinstance(raw.get("city_info"), dict) else {}
+        raw_cities = raw.get("city_list") if isinstance(raw.get("city_list"), list) else []
+        nested = raw.get("job_post_info") if isinstance(raw.get("job_post_info"), dict) else {}
+        location = str(city_info.get("name") or "").strip() or " / ".join(
+            dict.fromkeys(
+                str(city.get("name") or "").strip()
+                for city in raw_cities
+                if isinstance(city, dict) and city.get("name")
+            )
+        ) or "未披露"
+        job = Job(
+            title=str(raw.get("title") or "").strip(),
+            url=f"https://jobs.bytedance.com/experienced/position/{urllib.parse.quote(job_id)}/detail",
+            summary=strip_html(
+                "\n".join(str(raw.get(key) or "") for key in ("description", "requirement"))
+            ),
+            source=str(source["name"]),
+            job_id=job_id,
+            location=location,
+            scope=str(source.get("scope", "china")),
+            official=True,
+            source_key=str(source.get("key", source["name"])),
+            company=source_company(source),
+            published_at=timestamp_text(raw.get("publish_time")),
+            date_basis="published" if raw.get("publish_time") else "unknown",
+            active=True,
+            valid_through=timestamp_text(nested.get("expiry_time")),
+        )
+        if job.title and job_id and looks_like_candidate_job(job):
+            jobs.append(job)
+    return jobs, int(result.get("count") or len(raw_jobs))
+
+
+def parse_alibaba(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], int]:
+    data = json_object(payload)
+    content = data.get("content")
+    if data.get("success") is not True or not isinstance(content, dict):
+        raise ValueError("Alibaba response is not successful")
+    raw_jobs = content.get("datas")
+    if not isinstance(raw_jobs, list):
+        raise ValueError("Alibaba response has no jobs list")
+    jobs: list[Job] = []
+    for raw in raw_jobs:
+        if not isinstance(raw, dict):
+            continue
+        job_id = str(raw.get("id") or raw.get("code") or "")
+        position_url = urllib.parse.urljoin(
+            "https://talent.alibaba.com/",
+            str(raw.get("positionUrl") or ""),
+        )
+        parsed_position_url = urllib.parse.urlsplit(position_url)
+        if (
+            parsed_position_url.scheme != "https"
+            or (parsed_position_url.hostname or "").casefold() != "talent.alibaba.com"
+            or parsed_position_url.path != "/off-campus/position-detail"
+        ):
+            continue
+        experience = raw.get("experience") if isinstance(raw.get("experience"), dict) else {}
+        experience_text = ""
+        if experience.get("from") is not None:
+            experience_text = f"Experience: {experience['from']}+ years"
+        published = raw.get("publishTime")
+        modified = raw.get("modifyTime")
+        locations = raw.get("workLocations") if isinstance(raw.get("workLocations"), list) else []
+        job = Job(
+            title=str(raw.get("name") or "").strip(),
+            url=position_url,
+            summary=strip_html(
+                "\n".join(
+                    value
+                    for value in (
+                        str(raw.get("description") or ""),
+                        str(raw.get("requirement") or ""),
+                        experience_text,
+                    )
+                    if value
+                )
+            ),
+            source=str(source["name"]),
+            job_id=job_id,
+            location=" / ".join(str(value).strip() for value in locations if value) or "未披露",
+            scope=str(source.get("scope", "china")),
+            official=True,
+            source_key=str(source.get("key", source["name"])),
+            company=source_company(source),
+            published_at=timestamp_text(published or modified),
+            date_basis="published" if published else "updated" if modified else "unknown",
+            active=True,
+        )
+        if job.title and job_id and is_public_http_url(job.url) and looks_like_candidate_job(job):
+            jobs.append(job)
+    return jobs, int(content.get("totalCount") or len(raw_jobs))
 
 
 def parse_greenhouse(payload: bytes, source: dict[str, Any]) -> list[Job]:
@@ -64,7 +197,15 @@ def parse_greenhouse(payload: bytes, source: dict[str, Any]) -> list[Job]:
             date_basis="updated" if raw.get("updated_at") else "unknown",
             active=True,
         )
-        if job.title and is_public_http_url(job.url) and looks_like_product_job(job):
+        if (
+            job.title
+            and official_job_url_allowed(
+                job.url,
+                source,
+                ("job-boards.greenhouse.io", "boards.greenhouse.io"),
+            )
+            and looks_like_candidate_job(job)
+        ):
             jobs.append(job)
     return jobs
 
@@ -107,7 +248,11 @@ def parse_ashby(payload: bytes, source: dict[str, Any]) -> list[Job]:
             active=True,
             valid_through=timestamp_text(raw.get("validThrough") or raw.get("applicationDeadline")),
         )
-        if job.title and is_public_http_url(job.url) and looks_like_product_job(job):
+        if (
+            job.title
+            and official_job_url_allowed(job.url, source, ("jobs.ashbyhq.com",))
+            and looks_like_candidate_job(job)
+        ):
             jobs.append(job)
     return jobs
 
@@ -156,7 +301,11 @@ def parse_lever(payload: bytes, source: dict[str, Any]) -> list[Job]:
             date_basis="created" if raw.get("createdAt") else "unknown",
             active=True,
         )
-        if job.title and is_public_http_url(job.url) and looks_like_product_job(job):
+        if (
+            job.title
+            and official_job_url_allowed(job.url, source, ("jobs.lever.co",))
+            and looks_like_candidate_job(job)
+        ):
             jobs.append(job)
     return jobs
 
@@ -202,9 +351,81 @@ def parse_moka(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], int]:
             active=True,
             valid_through=timestamp_text(raw.get("closedAt")),
         )
-        if job.title and job_id and looks_like_product_job(job):
+        if job.title and job_id and looks_like_candidate_job(job):
             jobs.append(job)
     return jobs, int(data.get("total") or len(raw_jobs))
+
+
+def meituan_location(raw_locations: Any) -> str:
+    if not isinstance(raw_locations, list):
+        return "未披露"
+    return " / ".join(
+        dict.fromkeys(
+            str(raw.get("name") or "").strip()
+            for raw in raw_locations
+            if isinstance(raw, dict) and raw.get("name")
+        )
+    ) or "未披露"
+
+
+def meituan_job(raw: dict[str, Any], source: dict[str, Any]) -> Job | None:
+    if str(raw.get("jobStatus") or "") != "000" or str(raw.get("jobType") or "3") != "3":
+        return None
+    job_id = str(raw.get("jobUnionId") or "")
+    first_post = raw.get("firstPostTime")
+    job = Job(
+        title=str(raw.get("name") or "").strip(),
+        url=(
+            "https://zhaopin.meituan.com/web/position/detail"
+            f"?jobUnionId={urllib.parse.quote(job_id)}&jobShareType=1&highlightType=social"
+        ),
+        summary=strip_html(
+            "\n".join(
+                str(raw.get(key) or "")
+                for key in ("jobDuty", "jobRequirement", "highLight", "workYear")
+            )
+        ),
+        source=str(source["name"]),
+        job_id=job_id,
+        location=meituan_location(raw.get("cityList")),
+        scope=str(source.get("scope", "china")),
+        official=True,
+        source_key=str(source.get("key", source["name"])),
+        company=source_company(source),
+        published_at=timestamp_text(first_post),
+        date_basis="published" if first_post else "unknown",
+        active=True,
+        valid_through=timestamp_text(raw.get("expiredTime")),
+    )
+    return job if job.title and job_id and looks_like_candidate_job(job) else None
+
+
+def parse_meituan(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], int]:
+    data = json_object(payload)
+    result = data.get("data")
+    if data.get("status") != 1 or not isinstance(result, dict):
+        raise ValueError("Meituan response is not successful")
+    raw_jobs = result.get("list")
+    page = result.get("page") if isinstance(result.get("page"), dict) else {}
+    if not isinstance(raw_jobs, list):
+        raise ValueError("Meituan response has no jobs list")
+    jobs = [
+        job
+        for raw in raw_jobs
+        if isinstance(raw, dict) and (job := meituan_job(raw, source)) is not None
+    ]
+    return jobs, int(page.get("totalCount") or len(raw_jobs))
+
+
+def parse_meituan_detail(payload: bytes, source: dict[str, Any]) -> Job:
+    data = json_object(payload)
+    raw = data.get("data")
+    if data.get("status") != 1 or not isinstance(raw, dict):
+        raise ValueError("Meituan detail response is not successful")
+    job = meituan_job(raw, source)
+    if job is None:
+        raise ClosedJobError("Meituan detail confirms the listing is closed or out of scope")
+    return job
 
 
 def parse_tencent(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], int]:
@@ -217,7 +438,7 @@ def parse_tencent(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], in
         raise ValueError("Tencent response has no Posts list")
     jobs: list[Job] = []
     for raw in raw_jobs:
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or raw.get("IsValid") is False:
             continue
         job_id = str(raw.get("PostId") or "")
         url = urllib.parse.urljoin(
@@ -229,6 +450,13 @@ def parse_tencent(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], in
             url = urllib.parse.urlunsplit(
                 ("https", parsed_url.netloc, parsed_url.path, parsed_url.query, parsed_url.fragment)
             )
+            parsed_url = urllib.parse.urlsplit(url)
+        if (
+            parsed_url.scheme != "https"
+            or (parsed_url.hostname or "").casefold() != "careers.tencent.com"
+            or not parsed_url.path.endswith("/jobdesc.html")
+        ):
+            continue
         job = Job(
             title=str(raw.get("RecruitPostName") or "").strip(),
             url=url,
@@ -246,6 +474,6 @@ def parse_tencent(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], in
             date_basis="updated" if raw.get("LastUpdateTime") else "unknown",
             active=True,
         )
-        if job.title and job_id and is_public_http_url(job.url) and looks_like_product_job(job):
+        if job.title and job_id and is_public_http_url(job.url) and looks_like_candidate_job(job):
             jobs.append(job)
     return jobs, int(result.get("Count") or len(raw_jobs))

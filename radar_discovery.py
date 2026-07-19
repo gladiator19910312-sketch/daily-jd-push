@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import http.cookiejar
 import json
 import re
 import time
@@ -12,8 +13,20 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any, Iterable
 
-from radar_ats import parse_ashby, parse_greenhouse, parse_lever, parse_moka, parse_tencent, strip_html
-from radar_matching import looks_like_product_job
+from radar_ats import (
+    ClosedJobError,
+    parse_alibaba,
+    parse_ashby,
+    parse_bytedance,
+    parse_greenhouse,
+    parse_lever,
+    parse_meituan,
+    parse_meituan_detail,
+    parse_moka,
+    parse_tencent,
+    strip_html,
+)
+from radar_matching import looks_like_candidate_job
 from radar_search import duckduckgo_lite_url, parse_duckduckgo_results
 from radar_types import USER_AGENT, Job, is_public_http_url
 
@@ -75,6 +88,63 @@ def http_get(
     raise RuntimeError("unreachable")
 
 
+def http_post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: int = 12,
+    attempts: int = 2,
+    headers: dict[str, str] | None = None,
+    opener: Any = None,
+) -> bytes:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request_headers = {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json",
+    }
+    request_headers.update(headers or {})
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=request_headers,
+        method="POST",
+    )
+    client = opener or urllib.request.build_opener()
+    for attempt in range(max(1, attempts)):
+        try:
+            with client.open(request, timeout=timeout_seconds) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            retryable = exc.code == 429 or 500 <= exc.code < 600
+            if not retryable or attempt == attempts - 1:
+                raise
+            time.sleep(min(2**attempt, 8))
+        except urllib.error.URLError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(2**attempt)
+    raise RuntimeError("unreachable")
+
+
+def http_get_with_opener(
+    url: str,
+    opener: Any,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout_seconds: int = 12,
+) -> bytes:
+    request_headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+    request_headers.update(headers or {})
+    request = urllib.request.Request(url, headers=request_headers)
+    with opener.open(request, timeout=timeout_seconds) as response:
+        return response.read()
+
+
 def url_with_query(url: str, **updates: Any) -> str:
     parsed = urllib.parse.urlsplit(url)
     query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
@@ -84,8 +154,140 @@ def url_with_query(url: str, **updates: Any) -> str:
     )
 
 
-def fetch_official_source(source: dict[str, Any]) -> list[Job]:
+def fetch_official_source(
+    source: dict[str, Any],
+    max_seconds: float = 60,
+    warnings: list[str] | None = None,
+) -> list[Job]:
+    deadline = time.monotonic() + max(5.0, float(max_seconds))
+    scan_warnings = warnings if warnings is not None else []
+    source_name = str(source.get("name", "official"))
+
+    def out_of_time() -> bool:
+        return time.monotonic() >= deadline
+
+    def warn_once(message: str) -> None:
+        if message not in scan_warnings:
+            scan_warnings.append(message)
+
     source_type = str(source["type"])
+    if source_type == "bytedance":
+        cookie_jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+        referer = "https://jobs.bytedance.com/experienced/position"
+        token_data = json.loads(
+            http_post_json(
+                str(source["token_url"]),
+                {"portal_entrance": 1},
+                headers={"Referer": referer},
+                opener=opener,
+            ).decode("utf-8")
+        )
+        raw_token = token_data.get("data") if isinstance(token_data, dict) else None
+        token = raw_token.get("token") if isinstance(raw_token, dict) else raw_token
+        if not isinstance(token, str) or not token:
+            raise ValueError("ByteDance CSRF token is missing")
+        page_size = int(source.get("page_size", 20))
+        max_pages = int(source.get("max_pages_per_keyword", 2))
+        jobs: dict[str, Job] = {}
+        last_error: Exception | None = None
+        for keyword in source.get("keywords", []):
+            if out_of_time():
+                break
+            try:
+                for page in range(max_pages):
+                    if out_of_time():
+                        break
+                    payload = {
+                        "job_category_id_list": [],
+                        "keyword": str(keyword),
+                        "limit": page_size,
+                        "location_code_list": [],
+                        "offset": page * page_size,
+                        "portal_entrance": 1,
+                        "portal_type": 2,
+                        "recruitment_id_list": [],
+                        "subject_id_list": [],
+                    }
+                    page_jobs, total = parse_bytedance(
+                        http_post_json(
+                            str(source["url"]),
+                            payload,
+                            headers={"Referer": referer, "x-csrf-token": token},
+                            opener=opener,
+                        ),
+                        source,
+                    )
+                    jobs.update((job.identity, job) for job in page_jobs)
+                    if (page + 1) * page_size >= total:
+                        break
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, urllib.error.URLError) as exc:
+                last_error = exc
+                continue
+        if not jobs and last_error:
+            raise last_error
+        if jobs and last_error:
+            warn_once(f"{source_name}: 部分关键词请求失败，已保留其余结果")
+        if out_of_time():
+            warn_once(f"{source_name}: 达到来源时间预算，结果可能不完整")
+        return list(jobs.values())
+    if source_type == "alibaba":
+        cookie_jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+        referer = "https://talent.alibaba.com/off-campus/position-list?lang=zh"
+        http_get_with_opener(referer, opener)
+        token = next(
+            (urllib.parse.unquote(cookie.value) for cookie in cookie_jar if cookie.name == "XSRF-TOKEN"),
+            "",
+        )
+        if not token:
+            raise ValueError("Alibaba XSRF token is missing")
+        url = url_with_query(str(source["url"]), _csrf=token)
+        page_size = int(source.get("page_size", 20))
+        max_pages = int(source.get("max_pages_per_keyword", 2))
+        jobs: dict[str, Job] = {}
+        last_error: Exception | None = None
+        for keyword in source.get("keywords", []):
+            if out_of_time():
+                break
+            try:
+                for page in range(1, max_pages + 1):
+                    if out_of_time():
+                        break
+                    payload = {
+                        "batchId": "",
+                        "categories": "",
+                        "channel": "group_official_site",
+                        "deptCodes": [],
+                        "key": str(keyword),
+                        "language": "zh",
+                        "pageIndex": page,
+                        "pageSize": page_size,
+                        "regions": "",
+                        "subCategories": "",
+                    }
+                    page_jobs, total = parse_alibaba(
+                        http_post_json(
+                            url,
+                            payload,
+                            headers={"Referer": referer, "Origin": "https://talent.alibaba.com"},
+                            opener=opener,
+                        ),
+                        source,
+                    )
+                    jobs.update((job.identity, job) for job in page_jobs)
+                    if page * page_size >= total:
+                        break
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, urllib.error.URLError) as exc:
+                last_error = exc
+                continue
+        if not jobs and last_error:
+            raise last_error
+        if jobs and last_error:
+            warn_once(f"{source_name}: 部分关键词请求失败，已保留其余结果")
+        if out_of_time():
+            warn_once(f"{source_name}: 达到来源时间预算，结果可能不完整")
+        return list(jobs.values())
     if source_type == "greenhouse":
         return parse_greenhouse(http_get(str(source["url"])), source)
     if source_type == "ashby":
@@ -94,31 +296,122 @@ def fetch_official_source(source: dict[str, Any]) -> list[Job]:
         return parse_lever(http_get(str(source["url"])), source)
     if source_type == "moka":
         limit, offset = int(source.get("page_size", 100)), 0
+        max_pages = int(source.get("max_pages", 3))
         jobs: list[Job] = []
-        while True:
+        for _ in range(max_pages):
+            if out_of_time():
+                break
             payload = http_get(url_with_query(str(source["url"]), limit=limit, offset=offset))
             page_jobs, total = parse_moka(payload, source)
             jobs.extend(page_jobs)
             offset += limit
             if offset >= total:
-                return jobs
+                break
+        if out_of_time():
+            warn_once(f"{source_name}: 达到来源时间预算，结果可能不完整")
+        return jobs
     if source_type == "tencent":
         page_size = int(source.get("page_size", 100))
+        max_pages = int(source.get("max_pages_per_keyword", 2))
         jobs: dict[str, Job] = {}
+        last_error: Exception | None = None
         for keyword in source.get("keywords", []):
-            page = 1
-            while True:
-                url = str(source["url_template"]).format(
-                    keyword=urllib.parse.quote(str(keyword)),
-                    page=page,
-                    page_size=page_size,
-                )
-                page_jobs, total = parse_tencent(http_get(url), source)
-                jobs.update((job.identity, job) for job in page_jobs)
-                if page * page_size >= total:
-                    break
-                page += 1
+            if out_of_time():
+                break
+            try:
+                for page in range(1, max_pages + 1):
+                    if out_of_time():
+                        break
+                    url = str(source["url_template"]).format(
+                        keyword=urllib.parse.quote(str(keyword)),
+                        page=page,
+                        page_size=page_size,
+                    )
+                    page_jobs, total = parse_tencent(http_get(url), source)
+                    jobs.update((job.identity, job) for job in page_jobs)
+                    if page * page_size >= total:
+                        break
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, urllib.error.URLError) as exc:
+                last_error = exc
+                continue
+        if not jobs and last_error:
+            raise last_error
+        if jobs and last_error:
+            warn_once(f"{source_name}: 部分关键词请求失败，已保留其余结果")
+        if out_of_time():
+            warn_once(f"{source_name}: 达到来源时间预算，结果可能不完整")
         return list(jobs.values())
+    if source_type == "meituan":
+        page_size = int(source.get("page_size", 30))
+        max_pages = int(source.get("max_pages_per_keyword", 2))
+        jobs: dict[str, Job] = {}
+        detail_limit = int(source.get("max_detail_fetches", 24))
+        last_error: Exception | None = None
+        for keyword in source.get("keywords", []):
+            if out_of_time():
+                break
+            try:
+                for page in range(1, max_pages + 1):
+                    if out_of_time():
+                        break
+                    payload = {
+                        "page": {"pageNo": page, "pageSize": page_size},
+                        "jobShareType": "1",
+                        "keywords": str(keyword),
+                        "cityList": source.get("city_codes", []),
+                        "department": [],
+                        "jfJgList": [],
+                        "jobType": [{"code": "3", "subCode": []}],
+                        "typeCode": [],
+                        "specialCode": [],
+                    }
+                    page_jobs, total = parse_meituan(
+                        http_post_json(
+                            str(source["url"]),
+                            payload,
+                            headers={"Referer": "https://zhaopin.meituan.com/web/social"},
+                        ),
+                        source,
+                    )
+                    jobs.update((job.identity, job) for job in page_jobs)
+                    if page * page_size >= total:
+                        break
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, urllib.error.URLError) as exc:
+                last_error = exc
+                continue
+        if not jobs and last_error:
+            raise last_error
+        detailed: dict[str, Job] = {}
+        closed_identities: set[str] = set()
+        for job in list(jobs.values())[:detail_limit]:
+            if out_of_time():
+                break
+            try:
+                detail = parse_meituan_detail(
+                    http_post_json(
+                        str(source["detail_url"]),
+                        {"jobUnionId": job.job_id, "jobShareType": "1"},
+                        headers={"Referer": job.url},
+                        attempts=1,
+                    ),
+                    source,
+                )
+            except ClosedJobError:
+                closed_identities.add(job.identity)
+                continue
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, urllib.error.URLError):
+                detail = None
+            detailed[job.identity] = detail or job
+        detailed.update(
+            (identity, job)
+            for identity, job in jobs.items()
+            if identity not in detailed and identity not in closed_identities
+        )
+        if jobs and last_error:
+            warn_once(f"{source_name}: 部分关键词请求失败，已保留其余结果")
+        if out_of_time():
+            warn_once(f"{source_name}: 达到来源时间预算，结果可能不完整")
+        return list(detailed.values())
     raise ValueError(f"unsupported source type: {source_type}")
 
 
@@ -155,16 +448,45 @@ def bing_rss_url(query: str, language: str) -> str:
 def discover_jobs(config: dict[str, Any]) -> tuple[list[Job], list[str]]:
     discovered: dict[str, Job] = {}
     failures: list[str] = []
-    for source in config.get("official_sources", []):
+    official_sources = list(config.get("official_sources", []))
+    official_attempted = 0
+    official_succeeded = 0
+    official_deadline = time.monotonic() + float(
+        config.get("official_discovery_budget_seconds", 360)
+    )
+    source_budget = float(config.get("official_source_budget_seconds", 60))
+    for source in official_sources:
+        remaining = official_deadline - time.monotonic()
+        if remaining <= 0:
+            failures.append("企业官网扫描：达到本轮时间预算，剩余来源本轮未覆盖")
+            break
+        official_attempted += 1
         try:
-            for job in fetch_official_source(source):
+            source_warnings: list[str] = []
+            for job in fetch_official_source(
+                source,
+                min(source_budget, remaining),
+                source_warnings,
+            ):
                 discovered[job.identity] = job
+            failures.extend(source_warnings)
+            if not source_warnings:
+                official_succeeded += 1
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, urllib.error.URLError) as exc:
             failures.append(f"{source.get('name', 'official')}: {type(exc).__name__}")
+    if official_attempted and official_succeeded * 2 < official_attempted:
+        failures.insert(
+            0,
+            f"来源健康告警：企业官网成功 {official_succeeded}/{official_attempted}",
+        )
 
     limit = int(config.get("max_results_per_query", 12))
     trusted_hosts = config.get("trusted_job_hosts", [])
+    search_deadline = time.monotonic() + float(config.get("job_search_budget_seconds", 180))
     for query in config.get("queries", []):
+        if time.monotonic() >= search_deadline:
+            failures.append("企业官网搜索兜底：达到本轮时间预算，剩余查询本轮未覆盖")
+            break
         candidates: list[Job] = []
         primary_error: Exception | None = None
         try:
@@ -181,7 +503,7 @@ def discover_jobs(config: dict[str, Any]) -> tuple[list[Job], list[str]]:
                     f"{query['name']} · 搜索索引待验活",
                     scope=str(query.get("scope", "unknown")),
                 )
-                if is_trusted_job_url(candidate.url, trusted_hosts) and looks_like_product_job(candidate):
+                if is_trusted_job_url(candidate.url, trusted_hosts) and looks_like_candidate_job(candidate):
                     candidates.append(candidate)
         except (KeyError, OSError, urllib.error.URLError) as exc:
             primary_error = exc
@@ -201,7 +523,7 @@ def discover_jobs(config: dict[str, Any]) -> tuple[list[Job], list[str]]:
                         f"{query['name']} · 搜索索引待验活",
                         scope=str(query.get("scope", "unknown")),
                     )
-                    if is_trusted_job_url(candidate.url, trusted_hosts) and looks_like_product_job(candidate):
+                    if is_trusted_job_url(candidate.url, trusted_hosts) and looks_like_candidate_job(candidate):
                         candidates.append(candidate)
             except (ET.ParseError, KeyError, OSError, urllib.error.URLError) as exc:
                 error = primary_error or exc
@@ -292,11 +614,11 @@ def page_is_closed(body: str) -> bool:
 def enrich_jobs(
     jobs: Iterable[Job],
     max_fetches: int,
-    official_hosts: Iterable[str] = (),
+    employer_hosts: Iterable[str] = (),
 ) -> list[Job]:
     enriched: list[Job] = []
     fetched = 0
-    allowed_hosts = TRUSTED_JOB_HOSTS | {host.casefold() for host in official_hosts}
+    allowed_hosts = TRUSTED_JOB_HOSTS | {host.casefold() for host in employer_hosts}
     for job in jobs:
         if job.official or fetched >= max_fetches:
             enriched.append(job)
@@ -332,7 +654,7 @@ def enrich_jobs(
                         title=title,
                         url=job.url,
                         summary=description,
-                        source=f"{job.source} · 官网已验活",
+                        source=f"{job.source} · 企业招聘页已验活",
                         job_id=job.job_id,
                         location=posting_location(posting, body),
                         scope=job.scope,
