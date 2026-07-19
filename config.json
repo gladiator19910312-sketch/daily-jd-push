@@ -2,12 +2,19 @@
   "timezone": "Asia/Shanghai",
   "fit_threshold": 72,
   "ready_threshold": 48,
-  "global_fit_threshold": 88,
+  "global_fit_threshold": 80,
   "require_official_source": true,
   "max_results_per_query": 12,
-  "max_detail_fetches": 10,
+  "max_detail_fetches": 18,
   "max_push_jobs": 4,
   "max_global_push_jobs": 2,
+  "primary_locations": ["北京", "天津", "Beijing", "Tianjin"],
+  "preferred_job_age_days": 90,
+  "max_job_age_days": 180,
+  "max_primary_push_jobs": 5,
+  "max_trend_push_jobs": 3,
+  "max_signal_push_items": 3,
+  "trend_signal_max_age_days": 45,
   "current_fixed_cash_wan": null,
   "target_total_comp_wan": null,
   "usd_cny": 7.0,
@@ -63,6 +70,30 @@
       "scope": "china",
       "url": "https://api.mokahr.com/api-platform/v1/jobs/moonshot?mode=social&siteId=148506&status=open&limit=100&offset=0",
       "job_url_template": "https://app.mokahr.com/apply/moonshot/148506#/job/{id}"
+    },
+    {
+      "type": "moka",
+      "key": "moka:baai",
+      "name": "北京智源研究院官方",
+      "scope": "china",
+      "url": "https://api.mokahr.com/api-platform/v1/jobs/baai?mode=social&siteId=42173&status=open&limit=100&offset=0",
+      "job_url_template": "https://app.mokahr.com/social-recruitment/baai/42173#/job/{id}"
+    },
+    {
+      "type": "moka",
+      "key": "moka:deeproute",
+      "name": "元戎启行官方",
+      "scope": "china",
+      "url": "https://api.mokahr.com/api-platform/v1/jobs/deeproute?mode=social&siteId=143885&status=open&limit=100&offset=0",
+      "job_url_template": "https://app.mokahr.com/social-recruitment/deeproute/143885#/job/{id}"
+    },
+    {
+      "type": "tencent",
+      "key": "tencent:official",
+      "name": "腾讯官方招聘",
+      "scope": "china",
+      "url_template": "https://careers.tencent.com/tencentcareer/api/post/Query?keyword={keyword}&pageIndex={page}&pageSize={page_size}&language=zh-cn&area=cn",
+      "keywords": ["Agent", "评测", "大模型产品"]
     },
     {
       "type": "ashby",
@@ -128,36 +159,223 @@
       "url": "https://api.lever.co/v0/postings/waabi?mode=json"
     }
   ],
+  "trusted_job_hosts": [
+    "talent.baidu.com",
+    "jobs.bytedance.com",
+    "careers.tencent.com",
+    "talent.alibaba.com",
+    "hr.xiaomi.com",
+    "zhaopin.meituan.com",
+    "careers.microsoft.com",
+    "job.mohrss.gov.cn",
+    "fuwu.rsj.beijing.gov.cn",
+    "hrss.tj.gov.cn"
+  ],
+  "official_career_hosts": [
+    "talent.baidu.com",
+    "jobs.bytedance.com",
+    "careers.tencent.com",
+    "talent.alibaba.com",
+    "hr.xiaomi.com",
+    "zhaopin.meituan.com",
+    "careers.microsoft.com",
+    "job.mohrss.gov.cn",
+    "fuwu.rsj.beijing.gov.cn",
+    "hrss.tj.gov.cn"
+  ],
   "queries": [
     {
-      "name": "中国 Agent 评测产品",
+      "name": "百度官方 AI 产品",
       "scope": "china",
       "language": "zh-CN",
-      "query": "(Agent 产品经理 OR 智能体产品经理 OR Agent 评测) (Benchmark OR 评测 OR 可靠性 OR 多模态)"
+      "query": "site:talent.baidu.com/jobs/detail AI产品经理 Agent 北京"
     },
     {
-      "name": "中国头部公司 Agent",
+      "name": "字节官方 Agent 产品",
       "scope": "china",
       "language": "zh-CN",
-      "query": "(DeepSeek OR 深度求索 OR 千问 OR 字节 OR Seed OR 小米 OR 京东 OR 美团 OR 腾讯 OR 百度) (Agent OR 智能体) (产品经理 OR 产品专家 OR 评测)"
+      "query": "site:jobs.bytedance.com Agent 产品经理 北京"
     },
     {
-      "name": "全球 Agent Product",
-      "scope": "global",
-      "language": "en-US",
-      "query": "(Product Manager OR Product Lead OR Technical Product Manager) (agent OR agentic) (evals OR evaluation OR reliability OR safety)"
+      "name": "阿里官方大模型产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:talent.alibaba.com 大模型 产品经理 北京"
     },
     {
-      "name": "全球 Agent Quality",
-      "scope": "global",
+      "name": "小米官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:hr.xiaomi.com AI 产品经理 北京"
+    },
+    {
+      "name": "美团官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:zhaopin.meituan.com AI 产品经理 北京"
+    },
+    {
+      "name": "微软北京 Applied AI Product",
+      "scope": "china",
       "language": "en-US",
-      "query": "(Product Manager OR Product Lead) (Autonomous Agent OR AI Agent) (quality OR benchmark OR tool use OR safety measurement)"
+      "query": "site:careers.microsoft.com AI Product Manager Beijing"
+    },
+    {
+      "name": "中国公共招聘网 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:job.mohrss.gov.cn 人工智能 产品经理 北京 天津"
+    },
+    {
+      "name": "北京人社 AI 招聘",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:fuwu.rsj.beijing.gov.cn/jycy/jycs 人工智能 产品经理"
+    },
+    {
+      "name": "天津人社 AI 招聘",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:hrss.tj.gov.cn 招聘 人工智能 产品经理"
     },
     {
       "name": "官方招聘站点",
       "scope": "global",
       "language": "en-US",
       "query": "(site:openai.com/careers OR site:job-boards.greenhouse.io/anthropic OR site:google.com/about/careers OR site:jobs.apple.com OR site:amazon.jobs) (Product Manager) (agent OR evals OR safety)"
+    },
+    {
+      "name": "全球 Agent Product",
+      "scope": "global",
+      "language": "en-US",
+      "query": "Product Manager agent evals reliability safety careers"
+    }
+  ],
+  "trend_signal_hosts": [
+    "www.zhipin.com",
+    "m.zhipin.com",
+    "www.liepin.com",
+    "m.liepin.com",
+    "www.zhaopin.com",
+    "m.zhaopin.com",
+    "mwenku.51job.com",
+    "jobs.51job.com",
+    "www.51job.com",
+    "www.jobonline.cn",
+    "jobonline.cn",
+    "job.iguopin.com",
+    "www.iguopin.com",
+    "cn.indeed.com",
+    "www.indeed.com",
+    "www.linkedin.com",
+    "cn.linkedin.com",
+    "sg.linkedin.com",
+    "mp.weixin.qq.com",
+    "www.xiaohongshu.com",
+    "xiaohongshu.com",
+    "www.36kr.com",
+    "36kr.com",
+    "www.infoq.cn",
+    "infoq.cn",
+    "sspai.com",
+    "www.hiringlab.org"
+  ],
+  "trend_queries": [
+    {
+      "name": "BOSS 岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:zhipin.com/zhaopin/ 评测产品经理 Agent 北京"
+    },
+    {
+      "name": "猎聘岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:liepin.com/job/ AI产品经理 Agent 北京"
+    },
+    {
+      "name": "智联岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:zhaopin.com/jobdetail/ Agent产品经理 评测 北京"
+    },
+    {
+      "name": "51job 岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:jobs.51job.com AI产品经理 大模型 北京"
+    },
+    {
+      "name": "LinkedIn 行业岗位",
+      "kind": "platform",
+      "language": "en-US",
+      "query": "site:linkedin.com/jobs/view Agent Product Manager evaluation Beijing"
+    },
+    {
+      "name": "Indeed 中国岗位",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:cn.indeed.com AI Product Manager Agent 北京"
+    },
+    {
+      "name": "就业在线岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:jobonline.cn 智能体 产品经理 北京 招聘"
+    },
+    {
+      "name": "国聘岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:iguopin.com 人工智能 产品经理 北京 招聘"
+    },
+    {
+      "name": "微信公众号职场报告",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:mp.weixin.qq.com 大模型 人才 报告"
+    },
+    {
+      "name": "微信公众号 AI 产品求职",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:mp.weixin.qq.com AI产品经理 招聘 薪酬"
+    },
+    {
+      "name": "小红书职场报告",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:xiaohongshu.com AI产品经理 招聘"
+    },
+    {
+      "name": "小红书大模型求职",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:xiaohongshu.com 大模型 求职 薪酬"
+    },
+    {
+      "name": "36氪 AI 人才报告",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:36kr.com 大模型 人才 招聘"
+    },
+    {
+      "name": "InfoQ AI 人才报告",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:infoq.cn Agent 产品经理 人才 趋势"
+    },
+    {
+      "name": "BOSS 天津岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:zhipin.com/zhaopin AI产品经理 Agent 天津"
+    },
+    {
+      "name": "智联天津岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:zhaopin.com/jobdetail AI产品经理 天津"
     }
   ]
 }
