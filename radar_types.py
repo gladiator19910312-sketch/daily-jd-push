@@ -26,11 +26,32 @@ def normalize_url(value: str) -> str:
     if not is_public_http_url(value):
         return ""
     parsed = urllib.parse.urlsplit(value)
-    kept_query = [
-        (key, val)
-        for key, val in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-        if not key.casefold().startswith(("utm_", "ref", "src", "source"))
-    ]
+    host = (parsed.hostname or "").casefold()
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if host.endswith("linkedin.com") and "/jobs/view/" in parsed.path:
+        kept_query: list[tuple[str, str]] = []
+    elif host in {"www.xiaohongshu.com", "xiaohongshu.com"}:
+        kept_query = [
+            (key, val)
+            for key, val in query
+            if not key.casefold().startswith(("xsec_", "utm_"))
+            and key.casefold() not in {"source", "from"}
+        ]
+    elif host == "mp.weixin.qq.com":
+        stable_keys = {"__biz", "mid", "idx", "sn"}
+        kept_query = [(key, val) for key, val in query if key in stable_keys]
+    else:
+        tracking_keys = {
+            "gh_src", "lever-source", "source", "src", "from", "referrer", "trk",
+            "trackingid",
+        }
+        kept_query = [
+            (key, val)
+            for key, val in query
+            if not key.casefold().startswith("utm_")
+            and key.casefold() not in tracking_keys
+        ]
+    kept_query.sort(key=lambda item: (item[0].casefold(), item[1]))
     path = parsed.path.rstrip("/") or "/"
     return urllib.parse.urlunsplit(
         (parsed.scheme.casefold(), parsed.netloc.casefold(), path, urllib.parse.urlencode(kept_query), "")
@@ -48,6 +69,11 @@ class Job:
     scope: str = "unknown"
     official: bool = False
     source_key: str = ""
+    company: str = ""
+    published_at: str = ""
+    date_basis: str = "unknown"
+    active: bool = False
+    valid_through: str = ""
 
     @property
     def identity(self) -> str:
@@ -88,3 +114,18 @@ class Assessment:
     @property
     def eligible(self) -> bool:
         return self.excluded_reason is None
+
+
+@dataclass(frozen=True)
+class TrendSignal:
+    title: str
+    url: str
+    summary: str
+    source: str
+    kind: str
+    indexed_at: str
+
+    @property
+    def identity(self) -> str:
+        normalized = normalize_url(self.url) or self.title.casefold().strip()
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
