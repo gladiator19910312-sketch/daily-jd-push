@@ -16,19 +16,22 @@ from typing import Any, Iterable
 from radar_ats import (
     ClosedJobError,
     parse_alibaba,
+    parse_amazon,
     parse_ashby,
     parse_bytedance,
     parse_greenhouse,
     parse_lever,
     parse_meituan,
     parse_meituan_detail,
+    parse_microsoft_detail,
+    parse_microsoft_search,
     parse_moka,
     parse_tencent,
     strip_html,
 )
 from radar_matching import looks_like_candidate_job
 from radar_search import duckduckgo_lite_url, parse_duckduckgo_results
-from radar_types import USER_AGENT, Job, is_public_http_url
+from radar_types import USER_AGENT, Job, SourceCoverage, is_public_http_url
 
 
 TRUSTED_JOB_HOSTS = {
@@ -166,6 +169,9 @@ def fetch_official_source(
     def out_of_time() -> bool:
         return time.monotonic() >= deadline
 
+    def remaining_timeout() -> int:
+        return max(1, min(12, int(max(1.0, deadline - time.monotonic()))))
+
     def warn_once(message: str) -> None:
         if message not in scan_warnings:
             scan_warnings.append(message)
@@ -285,6 +291,150 @@ def fetch_official_source(
             raise last_error
         if jobs and last_error:
             warn_once(f"{source_name}: 部分关键词请求失败，已保留其余结果")
+        if out_of_time():
+            warn_once(f"{source_name}: 达到来源时间预算，结果可能不完整")
+        return list(jobs.values())
+    if source_type == "microsoft":
+        page_size = int(source.get("page_size", 10))
+        max_pages = int(source.get("max_pages_per_keyword", 2))
+        candidates: dict[str, Job] = {}
+        last_error: Exception | None = None
+        successful_pages = 0
+        for keyword in source.get("keywords", []):
+            if out_of_time():
+                break
+            try:
+                for page in range(max_pages):
+                    if out_of_time():
+                        break
+                    url = url_with_query(
+                        str(source["url"]),
+                        domain=str(source.get("domain", "microsoft.com")),
+                        query=str(keyword),
+                        location=str(source.get("location", "China, Beijing")),
+                        start=page * page_size,
+                        sort_by=str(source.get("sort_by", "timestamp")),
+                        hl=str(source.get("language", "en")),
+                    )
+                    page_jobs, total = parse_microsoft_search(
+                        http_get(url, timeout_seconds=remaining_timeout(), attempts=1),
+                        source,
+                    )
+                    successful_pages += 1
+                    candidates.update((job.identity, job) for job in page_jobs)
+                    if (page + 1) * page_size >= total:
+                        break
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                OSError,
+                urllib.error.URLError,
+            ) as exc:
+                last_error = exc
+                continue
+        if not successful_pages and last_error:
+            raise last_error
+        if last_error:
+            warn_once(f"{source_name}: 部分搜索请求失败，已保留其余结果")
+
+        detail_limit = int(source.get("max_detail_fetches", 12))
+        detailed: dict[str, Job] = {}
+        detail_errors = 0
+        for candidate in list(candidates.values())[:detail_limit]:
+            if out_of_time():
+                break
+            detail_url = url_with_query(
+                str(source["detail_url"]),
+                position_id=candidate.job_id,
+                domain=str(source.get("domain", "microsoft.com")),
+                hl=str(source.get("language", "en")),
+            )
+            try:
+                detail = parse_microsoft_detail(
+                    http_get(
+                        detail_url,
+                        timeout_seconds=remaining_timeout(),
+                        attempts=1,
+                    ),
+                    source,
+                    candidate.job_id,
+                )
+            except ClosedJobError:
+                continue
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                OSError,
+                urllib.error.URLError,
+            ):
+                detail_errors += 1
+                continue
+            detailed[detail.identity] = detail
+        if detail_errors:
+            warn_once(f"{source_name}: {detail_errors} 条候选岗位详情验活失败，未进入结果")
+        if len(candidates) > detail_limit:
+            warn_once(f"{source_name}: 达到详情验活上限，结果可能不完整")
+        if out_of_time():
+            warn_once(f"{source_name}: 达到来源时间预算，结果可能不完整")
+        return list(detailed.values())
+    if source_type == "amazon":
+        page_size = int(source.get("page_size", 20))
+        max_pages = int(source.get("max_pages_per_keyword", 1))
+        jobs: dict[str, Job] = {}
+        last_error: Exception | None = None
+        successful_pages = 0
+        truncated_keywords = 0
+        for keyword in source.get("keywords", []):
+            if out_of_time():
+                break
+            pages_fetched = 0
+            keyword_total = 0
+            try:
+                for page in range(max_pages):
+                    if out_of_time():
+                        break
+                    url = url_with_query(
+                        str(source["url"]),
+                        base_query=str(keyword),
+                        loc_query=str(source.get("loc_query", "China")),
+                        offset=page * page_size,
+                        result_limit=page_size,
+                        sort=str(source.get("sort", "relevant")),
+                    )
+                    page_jobs, total = parse_amazon(
+                        http_get(url, timeout_seconds=remaining_timeout(), attempts=1),
+                        source,
+                    )
+                    successful_pages += 1
+                    pages_fetched += 1
+                    keyword_total = total
+                    jobs.update((job.identity, job) for job in page_jobs)
+                    if (page + 1) * page_size >= total:
+                        break
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                OSError,
+                urllib.error.URLError,
+            ) as exc:
+                last_error = exc
+                continue
+            if keyword_total > pages_fetched * page_size:
+                truncated_keywords += 1
+        if not successful_pages and last_error:
+            raise last_error
+        if last_error:
+            warn_once(f"{source_name}: 部分关键词请求失败，已保留其余结果")
+        if truncated_keywords:
+            warn_once(
+                f"{source_name}: {truncated_keywords} 个关键词达到分页上限，结果可能不完整"
+            )
         if out_of_time():
             warn_once(f"{source_name}: 达到来源时间预算，结果可能不完整")
         return list(jobs.values())
@@ -445,9 +595,12 @@ def bing_rss_url(query: str, language: str) -> str:
     return f"https://www.bing.com/search?{params}"
 
 
-def discover_jobs(config: dict[str, Any]) -> tuple[list[Job], list[str]]:
+def discover_jobs_with_coverage(
+    config: dict[str, Any],
+) -> tuple[list[Job], list[str], tuple[SourceCoverage, ...]]:
     discovered: dict[str, Job] = {}
     failures: list[str] = []
+    coverage: list[SourceCoverage] = []
     official_sources = list(config.get("official_sources", []))
     official_attempted = 0
     official_succeeded = 0
@@ -455,25 +608,66 @@ def discover_jobs(config: dict[str, Any]) -> tuple[list[Job], list[str]]:
         config.get("official_discovery_budget_seconds", 360)
     )
     source_budget = float(config.get("official_source_budget_seconds", 60))
-    for source in official_sources:
+    for source_index, source in enumerate(official_sources):
         remaining = official_deadline - time.monotonic()
         if remaining <= 0:
             failures.append("企业官网扫描：达到本轮时间预算，剩余来源本轮未覆盖")
+            for skipped_index, skipped in enumerate(
+                official_sources[source_index:],
+                start=source_index,
+            ):
+                coverage.append(
+                    SourceCoverage(
+                        str(skipped.get("key") or f"{skipped.get('type', 'official')}:{skipped_index}"),
+                        str(skipped.get("name", "official")),
+                        str(skipped.get("scope", "unknown")),
+                        "skipped",
+                        0,
+                        "本轮企业官网总时间预算已用尽",
+                    )
+                )
             break
         official_attempted += 1
         try:
             source_warnings: list[str] = []
-            for job in fetch_official_source(
-                source,
-                min(source_budget, remaining),
-                source_warnings,
-            ):
+            source_jobs = {
+                job.identity: job
+                for job in fetch_official_source(
+                    source,
+                    min(source_budget, remaining),
+                    source_warnings,
+                )
+            }
+            for job in source_jobs.values():
                 discovered[job.identity] = job
             failures.extend(source_warnings)
             if not source_warnings:
                 official_succeeded += 1
+            diagnostic = "；".join(source_warnings)
+            if not diagnostic:
+                diagnostic = "扫描成功" if source_jobs else "扫描成功，未发现目标岗位"
+            coverage.append(
+                SourceCoverage(
+                    str(source.get("key") or f"{source.get('type', 'official')}:{source_index}"),
+                    str(source.get("name", "official")),
+                    str(source.get("scope", "unknown")),
+                    "partial" if source_warnings else "ok",
+                    len(source_jobs),
+                    diagnostic,
+                )
+            )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, urllib.error.URLError) as exc:
             failures.append(f"{source.get('name', 'official')}: {type(exc).__name__}")
+            coverage.append(
+                SourceCoverage(
+                    str(source.get("key") or f"{source.get('type', 'official')}:{source_index}"),
+                    str(source.get("name", "official")),
+                    str(source.get("scope", "unknown")),
+                    "error",
+                    0,
+                    type(exc).__name__,
+                )
+            )
     if official_attempted and official_succeeded * 2 < official_attempted:
         failures.insert(
             0,
@@ -534,7 +728,13 @@ def discover_jobs(config: dict[str, Any]) -> tuple[list[Job], list[str]]:
             failures.append(f"{query.get('name', 'search')}: 未发现可验活结果")
         for candidate in candidates:
             discovered.setdefault(candidate.identity, candidate)
-    return list(discovered.values()), failures
+    return list(discovered.values()), failures, tuple(coverage)
+
+
+def discover_jobs(config: dict[str, Any]) -> tuple[list[Job], list[str]]:
+    """Backward-compatible discovery API for existing callers."""
+    jobs, failures, _coverage = discover_jobs_with_coverage(config)
+    return jobs, failures
 
 
 def json_ld_job_posting(page: str) -> dict[str, Any]:
