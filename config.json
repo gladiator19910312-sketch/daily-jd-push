@@ -1,19 +1,25 @@
 {
   "timezone": "Asia/Shanghai",
-  "fit_threshold": 72,
-  "ready_threshold": 48,
-  "global_fit_threshold": 80,
+  "fit_threshold": 62,
+  "ready_threshold": 42,
+  "global_fit_threshold": 72,
   "require_official_source": true,
   "max_results_per_query": 12,
-  "max_detail_fetches": 18,
+  "max_detail_fetches": 30,
+  "official_discovery_budget_seconds": 360,
+  "official_source_budget_seconds": 60,
+  "job_search_budget_seconds": 180,
+  "trend_search_budget_seconds": 240,
   "max_push_jobs": 4,
   "max_global_push_jobs": 2,
   "primary_locations": ["北京", "天津", "Beijing", "Tianjin"],
   "preferred_job_age_days": 90,
   "max_job_age_days": 180,
-  "max_primary_push_jobs": 5,
-  "max_trend_push_jobs": 3,
+  "max_primary_push_jobs": 6,
+  "max_trend_push_jobs": 4,
   "max_signal_push_items": 3,
+  "max_platform_signal_items": 8,
+  "max_content_signal_items": 2,
   "trend_signal_max_age_days": 45,
   "current_fixed_cash_wan": null,
   "target_total_comp_wan": null,
@@ -36,6 +42,17 @@
     "Mistral",
     "DeepSeek",
     "深度求索",
+    "智谱",
+    "MiniMax",
+    "百川智能",
+    "零一万物",
+    "面壁智能",
+    "生数科技",
+    "阶跃星辰",
+    "月之暗面",
+    "Momenta",
+    "小马智行",
+    "文远知行",
     "阿里",
     "千问",
     "字节",
@@ -88,12 +105,51 @@
       "job_url_template": "https://app.mokahr.com/social-recruitment/deeproute/143885#/job/{id}"
     },
     {
+      "type": "bytedance",
+      "key": "bytedance:official-social",
+      "name": "字节跳动官方社招",
+      "company": "字节跳动",
+      "scope": "china",
+      "token_url": "https://jobs.bytedance.com/api/v1/csrf/token",
+      "url": "https://jobs.bytedance.com/api/v1/search/job/posts",
+      "keywords": ["Agent 产品", "智能体 产品", "大模型 产品", "多模态 产品", "评测 产品"],
+      "page_size": 20,
+      "max_pages_per_keyword": 1
+    },
+    {
+      "type": "alibaba",
+      "key": "alibaba:official-social",
+      "name": "阿里巴巴官方社招",
+      "company": "阿里巴巴",
+      "scope": "china",
+      "url": "https://talent.alibaba.com/position/search",
+      "keywords": ["Agent 产品", "智能体 产品", "大模型 产品", "多模态 产品", "评测 产品"],
+      "page_size": 20,
+      "max_pages_per_keyword": 1
+    },
+    {
+      "type": "meituan",
+      "key": "meituan:official-social",
+      "name": "美团官方社招",
+      "company": "美团",
+      "scope": "china",
+      "url": "https://zhaopin.meituan.com/api/official/job/getJobList",
+      "detail_url": "https://zhaopin.meituan.com/api/official/job/getJobDetail",
+      "keywords": ["Agent 产品经理", "智能体 产品", "大模型 产品", "AI 产品经理", "评测 产品"],
+      "page_size": 30,
+      "max_pages_per_keyword": 1,
+      "max_detail_fetches": 12
+    },
+    {
       "type": "tencent",
       "key": "tencent:official",
       "name": "腾讯官方招聘",
+      "company": "腾讯",
       "scope": "china",
       "url_template": "https://careers.tencent.com/tencentcareer/api/post/Query?keyword={keyword}&pageIndex={page}&pageSize={page_size}&language=zh-cn&area=cn",
-      "keywords": ["Agent", "评测", "大模型产品"]
+      "keywords": ["Agent", "智能体", "评测", "大模型产品", "AI产品", "多模态", "模型质量", "产品负责人", "产品专家"],
+      "page_size": 100,
+      "max_pages_per_keyword": 2
     },
     {
       "type": "ashby",
@@ -114,7 +170,8 @@
       "key": "greenhouse:waymo",
       "name": "Waymo 官方",
       "scope": "global",
-      "url": "https://boards-api.greenhouse.io/v1/boards/waymo/jobs?content=true"
+      "url": "https://boards-api.greenhouse.io/v1/boards/waymo/jobs?content=true",
+      "allowed_job_hosts": ["job-boards.greenhouse.io", "boards.greenhouse.io", "careers.withwaymo.com"]
     },
     {
       "type": "greenhouse",
@@ -157,6 +214,13 @@
       "name": "Waabi 官方",
       "scope": "global",
       "url": "https://api.lever.co/v0/postings/waabi?mode=json"
+    },
+    {
+      "type": "ashby",
+      "key": "ashby:mistral",
+      "name": "Mistral AI 官方",
+      "scope": "global",
+      "url": "https://api.ashbyhq.com/posting-api/job-board/mistral.ai?includeCompensation=true"
     }
   ],
   "trusted_job_hosts": [
@@ -166,22 +230,16 @@
     "talent.alibaba.com",
     "hr.xiaomi.com",
     "zhaopin.meituan.com",
-    "careers.microsoft.com",
-    "job.mohrss.gov.cn",
-    "fuwu.rsj.beijing.gov.cn",
-    "hrss.tj.gov.cn"
+    "careers.microsoft.com"
   ],
-  "official_career_hosts": [
+  "employer_career_hosts": [
     "talent.baidu.com",
     "jobs.bytedance.com",
     "careers.tencent.com",
     "talent.alibaba.com",
     "hr.xiaomi.com",
     "zhaopin.meituan.com",
-    "careers.microsoft.com",
-    "job.mohrss.gov.cn",
-    "fuwu.rsj.beijing.gov.cn",
-    "hrss.tj.gov.cn"
+    "careers.microsoft.com"
   ],
   "queries": [
     {
@@ -194,13 +252,13 @@
       "name": "字节官方 Agent 产品",
       "scope": "china",
       "language": "zh-CN",
-      "query": "site:jobs.bytedance.com Agent 产品经理 北京"
+      "query": "site:jobs.bytedance.com/experienced/ (Agent OR 智能体 OR 大模型 OR 多模态 OR 评测) (产品 OR 负责人 OR 专家) 北京 -校招 -应届 -实习"
     },
     {
       "name": "阿里官方大模型产品",
       "scope": "china",
       "language": "zh-CN",
-      "query": "site:talent.alibaba.com 大模型 产品经理 北京"
+      "query": "site:talent.alibaba.com (大模型 OR 智能体 OR 多模态 OR 评测) (产品 OR 负责人 OR 专家) 北京 -校园招聘 -应届 -实习"
     },
     {
       "name": "小米官方 AI 产品",
@@ -212,31 +270,13 @@
       "name": "美团官方 AI 产品",
       "scope": "china",
       "language": "zh-CN",
-      "query": "site:zhaopin.meituan.com AI 产品经理 北京"
+      "query": "site:zhaopin.meituan.com/web/position/detail highlightType=social (AI OR 大模型 OR 智能体 OR 评测) (产品 OR 负责人 OR 专家) 北京"
     },
     {
       "name": "微软北京 Applied AI Product",
       "scope": "china",
       "language": "en-US",
       "query": "site:careers.microsoft.com AI Product Manager Beijing"
-    },
-    {
-      "name": "中国公共招聘网 AI 产品",
-      "scope": "china",
-      "language": "zh-CN",
-      "query": "site:job.mohrss.gov.cn 人工智能 产品经理 北京 天津"
-    },
-    {
-      "name": "北京人社 AI 招聘",
-      "scope": "china",
-      "language": "zh-CN",
-      "query": "site:fuwu.rsj.beijing.gov.cn/jycy/jycs 人工智能 产品经理"
-    },
-    {
-      "name": "天津人社 AI 招聘",
-      "scope": "china",
-      "language": "zh-CN",
-      "query": "site:hrss.tj.gov.cn 招聘 人工智能 产品经理"
     },
     {
       "name": "官方招聘站点",
@@ -265,6 +305,18 @@
     "jobonline.cn",
     "job.iguopin.com",
     "www.iguopin.com",
+    "maimai.cn",
+    "www.maimai.cn",
+    "job.mohrss.gov.cn",
+    "chinajob.mohrss.gov.cn",
+    "fuwu.rsj.beijing.gov.cn",
+    "hrss.tj.gov.cn",
+    "job.hrss.tj.gov.cn",
+    "tjrc.com.cn",
+    "www.tjrc.com.cn",
+    "tjtalents.com.cn",
+    "www.tjtalents.com.cn",
+    "www.newjobs.com.cn",
     "cn.indeed.com",
     "www.indeed.com",
     "www.linkedin.com",
@@ -321,13 +373,61 @@
       "name": "就业在线岗位线索",
       "kind": "platform",
       "language": "zh-CN",
-      "query": "site:jobonline.cn 智能体 产品经理 北京 招聘"
+      "query": "site:jobonline.cn/positionDetail (智能体 OR 大模型 OR 人工智能) (高级产品经理 OR 产品专家 OR 产品负责人) (北京 OR 天津) -校招 -应届 -实习"
     },
     {
       "name": "国聘岗位线索",
       "kind": "platform",
       "language": "zh-CN",
-      "query": "site:iguopin.com 人工智能 产品经理 北京 招聘"
+      "query": "site:job.iguopin.com/job/detail (智能体 OR 大模型 OR 人工智能) (高级产品经理 OR 产品专家 OR 产品负责人) (北京 OR 天津) -校招 -应届 -实习"
+    },
+    {
+      "name": "脉脉社招高阶线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:maimai.cn/article/detail (AI产品 OR Agent产品 OR 大模型产品 OR 智能体) (高级 OR 专家 OR 负责人 OR P7 OR P8) (北京 OR 天津) -校招 -应届 -实习"
+    },
+    {
+      "name": "高成长 AI 公司高阶岗位线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:liepin.com/job (智谱 OR MiniMax OR 百川智能 OR 零一万物 OR 面壁智能 OR 生数科技 OR 阶跃星辰 OR 月之暗面) (Agent OR 智能体 OR 大模型 OR 评测) (产品专家 OR 产品负责人 OR 高级产品经理) -校招 -应届 -实习"
+    },
+    {
+      "name": "高成长 AI 公司薪酬线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:zhipin.com/job_detail (智谱 OR MiniMax OR 百川智能 OR 零一万物 OR 面壁智能 OR 生数科技) (Agent OR 智能体 OR 大模型) (产品 OR 负责人 OR 专家) (50K OR 60K OR 70K) -校招 -应届 -实习"
+    },
+    {
+      "name": "中国公共招聘网社招线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:job.mohrss.gov.cn (人工智能 OR 大模型 OR 智能体) (高级产品经理 OR 产品专家 OR 产品负责人) (北京 OR 天津) -校招 -应届 -实习"
+    },
+    {
+      "name": "北京公共就业社招线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:fuwu.rsj.beijing.gov.cn/jycy/jycs (人工智能 OR 大模型 OR 智能体) (产品专家 OR 产品负责人 OR 高级产品经理) -校招 -应届 -实习"
+    },
+    {
+      "name": "北方人才网社招线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:tjrc.com.cn (人工智能 OR 大模型 OR 智能体) (产品专家 OR 产品负责人 OR 高级产品经理) 天津 -校招 -应届 -实习"
+    },
+    {
+      "name": "天津公共就业与人才服务社招线索",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "(site:job.hrss.tj.gov.cn OR site:tjtalents.com.cn) (人工智能 OR 大模型 OR 智能体) (产品 OR 负责人 OR 专家) 天津 -校招 -应届 -实习"
+    },
+    {
+      "name": "人社部人工智能招聘专项",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:chinajob.mohrss.gov.cn/h5/c 人工智能 互联网 招聘 专场"
     },
     {
       "name": "微信公众号职场报告",

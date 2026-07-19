@@ -12,16 +12,30 @@ PRODUCT_ROLE_TERMS = (
     "product manager", "product lead", "product owner", "technical product manager",
     "deployed product manager", "ai product builder", "agent product", "evals lead",
     "evaluation lead", "benchmark lead", "technical deployment lead", "产品经理",
-    "产品专家", "产品负责人",
+    "产品专家", "产品负责人", "产品总监",
 )
 TARGET_TITLE_TERMS = (
     "agent", "agentic", "autonomous", "eval", "benchmark", "quality", "reliability",
     "safety", "security", "model behavior", "model performance", "multimodal", "codex",
-    "智能体", "大模型", "评测", "可靠性", "安全", "多模态",
+    "智能体", "大模型", "评测", "可靠性", "安全", "多模态", "模型质量", "模型效果",
+    "模型评估", "模型测评",
+)
+SENIOR_ROLE_TERMS = (
+    "senior", "staff", "principal", "lead", "head", "director", "expert", "owner",
+    "高级", "资深", "专家", "负责人", "总监", "首席", "p7", "p8", "p9",
+)
+OWNERSHIP_ROLE_TERMS = (
+    "product", "business", "strategy", "platform", "application", "产品", "业务", "战略",
+    "平台", "应用", "质量",
+)
+ENGINEERING_TITLE_TERMS = (
+    "engineer", "engineering", "developer", "scientist", "researcher", "architect",
+    "工程师", "工程专家", "研发", "算法", "研究员", "科学家", "架构师", "开发",
 )
 DISALLOWED_TITLE_TERMS = (
     "product marketing", "growth product", "gtm ", "go-to-market", "customer success",
-    "sales", "产品运营", "增长产品", "市场营销",
+    "business development", "partnerships", "product operations", "sales", "产品运营",
+    "运营负责人", "运营专家", "商务拓展", "业务拓展", "渠道销售", "增长产品", "市场营销",
 )
 
 
@@ -39,7 +53,59 @@ def looks_like_product_job(job: Job) -> bool:
 
 
 def has_target_title(title: str) -> bool:
-    return contains_any(title, TARGET_TITLE_TERMS) or bool(re.search(r"(?i)\bAI\b", title))
+    return contains_any(title, TARGET_TITLE_TERMS) or bool(
+        re.search(r"(?i)(?<![a-z])AI(?![a-z])", title)
+    )
+
+
+def is_early_career_job(job: Job) -> bool:
+    """Reject only high-confidence campus, internship, and new-graduate roles."""
+    title = job.title.strip()
+    title_or_url = f"{title}\n{job.url}"
+    folded_url = job.url.casefold()
+    if re.search(
+        r"(?:/campus(?:/|$)|/intern(?:ship)?(?:/|$)|[?&](?:highlighttype|recruittype)=campus)",
+        folded_url,
+    ):
+        return True
+    if re.search(
+        r"(?i)(?:实习生|实习岗位|暑期实习|校招|校园招聘|应届(?:生|毕业生)?|"
+        r"管培生|管理培训生|20\d{2}届|\bintern(?:ship)?\b|\bnew\s*grad(?:uate)?\b|"
+        r"\bearly[\s_-]*career\b|\buniversity\s+graduate\b|"
+        r"\bcampus[\s_-]*(?:hire|recruit(?:ment)?)\b|"
+        r"\b(?:20\d{2}\s+)?graduate\s+(?:program|programme|scheme|role|position|hire|"
+        r"product\s+manager)\b|\bmanagement\s+trainee\b)",
+        title_or_url,
+    ):
+        return True
+    text = job.text
+    return bool(
+        re.search(
+            r"(?:面向|招聘|招募|仅限|欢迎)[^。；;\n]{0,24}"
+            r"(?:20\d{2}届|应届(?:生|毕业生)?|在校生|实习生)",
+            text,
+        )
+        or re.search(
+            r"(?i)\b(?:designed\s+for|seeking|hiring|open\s+to)\b[^.\n]{0,60}"
+            r"\b(?:new\s*grads?|recent\s+graduates?|students?|interns?)\b",
+            text,
+        )
+    )
+
+
+def looks_like_candidate_job(job: Job) -> bool:
+    """Broad pre-score gate for senior product and adjacent AI ownership roles."""
+    if is_early_career_job(job):
+        return False
+    if looks_like_product_job(job):
+        return True
+    title = job.title
+    if contains_any(title, ENGINEERING_TITLE_TERMS):
+        return False
+    return (
+        has_target_title(title)
+        and contains_any(title, (*SENIOR_ROLE_TERMS, *OWNERSHIP_ROLE_TERMS))
+    )
 
 
 def has_transport_domain(text: str) -> bool:
@@ -133,7 +199,7 @@ def assess_job(job: Job, config: dict[str, Any]) -> Assessment:
         text,
         [
             (("agent", "agentic", "智能体"), 12),
-            (("eval", "evaluation", "评测", "benchmark", "quality", "可靠性"), 16),
+            (("eval", "evaluation", "评测", "benchmark", "quality", "可靠性", "模型质量", "模型效果"), 16),
             (("multimodal", "多模态", "vision", "视觉"), 7),
             (("tool use", "tool calling", "mcp", "context", "memory", "工具调用", "上下文", "记忆"), 8),
             (("safety", "security", "high-consequence", "安全", "风控"), 7),
@@ -144,6 +210,8 @@ def assess_job(job: Job, config: dict[str, Any]) -> Assessment:
     )
     fit += 18 if looks_like_product_job(job) else 0
     fit += 22 if has_target_title(job.title) else -25
+    if has_target_title(job.title) and contains_any(job.title, SENIOR_ROLE_TERMS):
+        fit += 18
     if contains_any(job.title, ("eval", "evaluation", "benchmark", "评测")):
         fit += 16
 
@@ -158,6 +226,8 @@ def assess_job(job: Job, config: dict[str, Any]) -> Assessment:
     )
     if job_has_transport_domain(job):
         ready += 16
+    if contains_any(job.title, SENIOR_ROLE_TERMS):
+        ready += 6
 
     strengths: list[str] = []
     gaps: list[str] = []
@@ -192,10 +262,14 @@ def assess_job(job: Job, config: dict[str, Any]) -> Assessment:
         fit += 4
 
     exclusion = None
-    if contains_any(job.title, DISALLOWED_TITLE_TERMS):
+    if is_early_career_job(job):
+        exclusion = "校招/应届/实习岗位，不属于目标社招范围"
+    elif contains_any(job.title, DISALLOWED_TITLE_TERMS):
         exclusion = "GTM/增长/营销产品身份偏离目标"
     elif contains_any(text, ("forward deployed engineer", "fde ", "fdse", "solutions engineer", "售前", "驻场", "客户交付", "customer implementation")):
         exclusion = "FDE/售前/驻场交付身份冲突"
+    elif contains_any(job.title, ENGINEERING_TITLE_TERMS) and not looks_like_product_job(job):
+        exclusion = "工程岗位，不是产品 IC"
     elif contains_any(text, ("software engineer", "machine learning engineer", "applied ai engineer", "算法工程师")) and not looks_like_product_job(job):
         exclusion = "工程岗位，不是产品 IC"
     elif contains_any(text, ("frequent travel", "heavy travel", "高频出差", "长期出差")):

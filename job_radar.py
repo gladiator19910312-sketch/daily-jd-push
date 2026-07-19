@@ -12,7 +12,15 @@ from pathlib import Path
 from typing import Any
 
 # Re-export the public helpers used by tests and local analysis.
-from radar_ats import parse_ashby, parse_greenhouse, parse_moka, parse_tencent
+from radar_ats import (
+    parse_alibaba,
+    parse_ashby,
+    parse_bytedance,
+    parse_greenhouse,
+    parse_meituan,
+    parse_moka,
+    parse_tencent,
+)
 from radar_delivery import (
     format_report,
     load_seen,
@@ -27,6 +35,7 @@ from radar_discovery import discover_jobs, enrich_jobs, parse_rss
 from radar_market import partition_market
 from radar_matching import (
     assess_job,
+    looks_like_candidate_job,
     looks_like_product_job,
     parse_salary,
     rank_assessments,
@@ -73,8 +82,11 @@ def select_signals(
     signals: list[TrendSignal],
     max_items: int,
     seen_sources: set[str] | None = None,
+    *,
+    platform_limit: int | None = None,
+    content_limit: int | None = None,
 ) -> list[TrendSignal]:
-    """Keep platform discovery broad while reserving room for career reports."""
+    """Select diverse sources, with optional independent platform/content quotas."""
     if max_items <= 0:
         return []
     seen_sources = seen_sources or set()
@@ -90,6 +102,31 @@ def select_signals(
     content = prioritize_unseen_sources(
         [signal for signal in signals if signal.kind != "platform"]
     )
+
+    def diverse(values: list[TrendSignal], limit: int) -> list[TrendSignal]:
+        chosen: list[TrendSignal] = []
+        chosen_sources: set[str] = set()
+        for signal in values:
+            if signal.source in chosen_sources:
+                continue
+            chosen.append(signal)
+            chosen_sources.add(signal.source)
+            if len(chosen) >= limit:
+                return chosen
+        for signal in values:
+            if signal not in chosen:
+                chosen.append(signal)
+            if len(chosen) >= limit:
+                break
+        return chosen
+
+    if platform_limit is not None or content_limit is not None:
+        platform_quota = max(0, platform_limit or 0)
+        content_quota = max(0, content_limit or 0)
+        return (
+            diverse(platform, platform_quota) + diverse(content, content_quota)
+        )[:max_items]
+
     platform_quota = max_items - 1 if content and max_items > 1 else max_items
     selected: list[TrendSignal] = []
     selected_sources: set[str] = set()
@@ -138,13 +175,13 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     signals, signal_failures = discover_trend_signals(config)
     jobs, failures = discover_jobs(config)
-    jobs = [job for job in jobs if looks_like_product_job(job)]
+    jobs = [job for job in jobs if looks_like_candidate_job(job)]
     assessments = [assess_job(job, config) for job in jobs]
     candidates = [item.job for item in sorted(assessments, key=lambda item: item.fit, reverse=True)]
     enriched = enrich_jobs(
         candidates,
         int(config.get("max_detail_fetches", 10)),
-        config.get("official_career_hosts", ()),
+        config.get("employer_career_hosts", config.get("official_career_hosts", ())),
     )
     ranked = rank_assessments((assess_job(job, config) for job in enriched), config)
 
@@ -165,9 +202,16 @@ def main(argv: list[str] | None = None) -> int:
         fresh_trends,
         int(config.get("max_trend_push_jobs", 3)),
     )
+    platform_signal_limit = int(config.get("max_platform_signal_items", 0))
+    content_signal_limit = int(config.get("max_content_signal_items", 0))
+    signal_limit = (
+        platform_signal_limit + content_signal_limit
+        if platform_signal_limit or content_signal_limit
+        else int(config.get("max_signal_push_items", 3))
+    )
     selected_signals = select_signals(
         fresh_signals,
-        int(config.get("max_signal_push_items", 3)),
+        signal_limit,
         set()
         if args.force_all
         else {
@@ -175,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
             for identity in seen
             if identity.startswith("signal-source:")
         },
+        platform_limit=platform_signal_limit or None,
+        content_limit=content_signal_limit or None,
     )
     source_warnings = signal_failures[:1] + failures[:2] + signal_failures[1:] + failures[2:]
     report = format_report(

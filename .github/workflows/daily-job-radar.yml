@@ -25,12 +25,8 @@ concurrency:
 jobs:
   scan-and-notify:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 30
     env:
-      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-      CURRENT_FIXED_CASH_WAN: ${{ secrets.CURRENT_FIXED_CASH_WAN }}
-      TARGET_TOTAL_COMP_WAN: ${{ secrets.TARGET_TOTAL_COMP_WAN }}
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
       FORCE_ALL: ${{ inputs.force_all || 'false' }}
     steps:
@@ -59,4 +55,9 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Scan and notify
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          CURRENT_FIXED_CASH_WAN: ${{ secrets.CURRENT_FIXED_CASH_WAN }}
+          TARGET_TOTAL_COMP_WAN: ${{ secrets.TARGET_TOTAL_COMP_WAN }}
         run: python job_radar.py --config config.json

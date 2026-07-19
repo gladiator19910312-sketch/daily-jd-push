@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import time
 import urllib.error
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -12,8 +13,9 @@ from typing import Any
 from radar_ats import strip_html
 from radar_discovery import bing_rss_url, http_get
 from radar_market import parse_timestamp
+from radar_matching import is_early_career_job
 from radar_search import duckduckgo_lite_url, parse_duckduckgo_results
-from radar_types import TrendSignal, is_public_http_url
+from radar_types import Job, TrendSignal, is_public_http_url
 
 
 AI_TERMS = (
@@ -22,7 +24,8 @@ AI_TERMS = (
 )
 MARKET_TERMS = (
     "product manager", "product lead", "产品经理", "产品专家", "招聘", "岗位",
-    "hiring", "career", "职场", "薪酬", "人才", "报告", "趋势",
+    "产品负责人", "高级", "资深", "负责人", "专家", "社招", "hiring", "career",
+    "senior", "staff", "principal", "lead", "head", "职场", "薪酬", "人才", "报告", "趋势",
 )
 
 
@@ -67,6 +70,10 @@ def signal_is_recent(signal: TrendSignal, max_days: int, now: datetime | None = 
 
 def signal_is_relevant(signal: TrendSignal) -> bool:
     text = f"{signal.title}\n{signal.summary}".casefold()
+    if signal.kind == "platform" and is_early_career_job(
+        Job(signal.title, signal.url, signal.summary, signal.source)
+    ):
+        return False
     return any(term.casefold() in text for term in AI_TERMS) and any(
         term.casefold() in text for term in MARKET_TERMS
     )
@@ -95,7 +102,11 @@ def discover_trend_signals(config: dict[str, Any]) -> tuple[list[TrendSignal], l
             ordered_queries.append(content_queries[index])
         if index < len(platform_queries):
             ordered_queries.append(platform_queries[index])
+    deadline = time.monotonic() + float(config.get("trend_search_budget_seconds", 240))
     for query in ordered_queries:
+        if time.monotonic() >= deadline:
+            failures.append("平台与行业信号：达到本轮时间预算，剩余查询本轮未覆盖")
+            break
         signals: list[TrendSignal] = []
         primary_error: Exception | None = None
         try:
