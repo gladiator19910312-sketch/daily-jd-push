@@ -144,6 +144,8 @@ def assess_job(job: Job, config: dict[str, Any]) -> Assessment:
     )
     fit += 18 if looks_like_product_job(job) else 0
     fit += 22 if has_target_title(job.title) else -25
+    if contains_any(job.title, ("eval", "evaluation", "benchmark", "评测")):
+        fit += 16
 
     ready = 42 + count_matches(
         text,
@@ -173,13 +175,20 @@ def assess_job(job: Job, config: dict[str, Any]) -> Assessment:
     if contains_any(text, ("developer platform", "sdk", "api product", "开发者平台", "开放平台")):
         ready -= 7
         gaps.append("开发者平台/API 产品经验需补齐")
+    if contains_any(job.title, ("数据策略", "数据产品")):
+        fit -= 8
+        ready -= 1
+        gaps.append("偏数据策略，需核验是否拥有端到端产品与评测闭环")
     if contains_any(text, ("trust & safety", "integrity", "safeguard", "regulated", "安全测量", "合规")):
         ready -= 7
         gaps.append("正式 AI Safety/风险度量经验不足")
     if contains_any(text, ("8+ years", "八年以上", "8年以上")):
         ready -= 6
         gaps.append("总相关年限需确认满足硬门槛")
-    if contains_any(text, config.get("preferred_companies", ())):
+    if contains_any(
+        f"{text}\n{job.source}\n{job.company}",
+        config.get("preferred_companies", ()),
+    ):
         fit += 4
 
     exclusion = None
@@ -253,5 +262,29 @@ def select_for_push(items: Iterable[Assessment], max_jobs: int, max_global: int)
             global_count += 1
         selected.append(item)
         if len(selected) >= max_jobs:
+            break
+    return selected
+
+
+def select_diverse_assessments(
+    items: Iterable[Assessment],
+    max_items: int,
+) -> list[Assessment]:
+    """Prefer different employers before using a second slot for one source."""
+    values = list(items)
+    selected: list[Assessment] = []
+    seen_sources: set[str] = set()
+    for item in values:
+        source = item.job.company or item.job.source_key or item.job.source
+        if source.casefold() in seen_sources:
+            continue
+        selected.append(item)
+        seen_sources.add(source.casefold())
+        if len(selected) >= max_items:
+            return selected
+    for item in values:
+        if item not in selected:
+            selected.append(item)
+        if len(selected) >= max_items:
             break
     return selected

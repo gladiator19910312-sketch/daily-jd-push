@@ -10,25 +10,66 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from radar_types import HTTP_TIMEOUT_SECONDS, MAX_MESSAGE_BYTES, USER_AGENT, Assessment
+from radar_market import job_freshness, parse_timestamp
+from radar_types import (
+    HTTP_TIMEOUT_SECONDS,
+    MAX_MESSAGE_BYTES,
+    USER_AGENT,
+    Assessment,
+    TrendSignal,
+    is_public_http_url,
+)
+
+
+def load_seen_state(
+    path: Path,
+    retention_days: int = 180,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff = now - timedelta(days=min(max(retention_days, 1), 180))
+    raw_jobs = data.get("jobs")
+    if isinstance(raw_jobs, dict):
+        raw_entries = raw_jobs.items()
+    else:
+        migrated_at = str(data.get("updated_at") or now.isoformat())
+        raw_entries = ((identity, migrated_at) for identity in data.get("job_ids", []))
+    entries: dict[str, str] = {}
+    for identity, raw_value in raw_entries:
+        value = raw_value.get("last_seen_at") if isinstance(raw_value, dict) else raw_value
+        last_seen = parse_timestamp(value)
+        if isinstance(identity, str) and last_seen and last_seen >= cutoff:
+            entries[identity] = last_seen.isoformat()
+    return entries
+
+
+def save_seen_state(path: Path, entries: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 2,
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "jobs": dict(sorted(entries.items())),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_seen(path: Path) -> set[str]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return set(data.get("job_ids", []))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return set()
+    return set(load_seen_state(path))
 
 
 def save_seen(path: Path, seen: set[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"updated_at": datetime.now().isoformat(timespec="seconds"), "job_ids": sorted(seen)[-2000:]}
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    observed = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    save_seen_state(path, {identity: observed for identity in seen})
 
 
 def truncate_utf8(value: str, max_bytes: int) -> str:
@@ -40,30 +81,115 @@ def truncate_utf8(value: str, max_bytes: int) -> str:
     return prefix + suffix.decode("utf-8")
 
 
-def format_report(items: list[Assessment], discovered_count: int, failures: list[str]) -> str:
-    lines = [f"## Sunny 每日 Agent 岗位雷达｜{datetime.now():%Y-%m-%d}", ""]
+def signal_excerpt(signal: TrendSignal, max_chars: int = 90) -> str:
+    compact = " ".join(signal.summary.split())
+    return compact[:max_chars] + ("…" if len(compact) > max_chars else "")
+
+
+def markdown_text(value: Any) -> str:
+    compact = " ".join(str(value).split())
+    escaped = compact.replace("\\", "\\\\")
+    for marker in ("`", "*", "_", "[", "]", "(", ")", "<", ">", "|"):
+        escaped = escaped.replace(marker, f"\\{marker}")
+    return escaped
+
+
+def markdown_link(label: Any, url: str) -> str:
+    safe_label = markdown_text(label)
+    if not is_public_http_url(url):
+        return safe_label
+    safe_url = urllib.parse.quote(url, safe=":/?#[]@!$&'*+,;=%")
+    return f"[{safe_label}]({safe_url})"
+
+
+def format_report(
+    items: list[Assessment],
+    discovered_count: int,
+    failures: list[str],
+    *,
+    trend_items: list[Assessment] | None = None,
+    signals: list[TrendSignal] | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    config = config or {}
+    trend_items = trend_items or []
+    signals = signals or []
+    timezone = ZoneInfo(str(config.get("timezone", "Asia/Shanghai")))
+    now = datetime.now(timezone)
+    lines = [f"## Sunny 每日 Agent 岗位雷达｜{now:%Y-%m-%d}", "", "## 北京 / 天津｜可行动岗位", ""]
     if not items:
-        lines.extend(["今天没有发现同时通过 Fit、Ready 与薪酬公开红线的新岗位。", ""])
+        lines.extend(["今天没有发现新的、通过时效与职业红线的北京/天津岗位。", ""])
     for index, item in enumerate(items, 1):
         decision = "强匹配" if item.fit >= 85 and item.ready >= 65 else "值得核验"
+        freshness = job_freshness(item.job, config, now)
         lines.extend(
             [
-                f"### {index}. 【{decision}】[{item.job.title}]({item.job.url})",
-                f"- **地点 / 来源：** {item.job.location}｜{item.job.source}",
-                f"- **岗位重点：** {'；'.join(item.responsibilities)}",
+                f"### {index}. 【{decision}】{markdown_link(item.job.title, item.job.url)}",
+                f"- **地点 / 来源：** {markdown_text(item.job.location)}｜{markdown_text(item.job.source)}",
+                f"- **岗位时效：** {markdown_text(freshness.label)}",
+                f"- **岗位重点：** {'；'.join(markdown_text(value) for value in item.responsibilities)}",
                 f"- **Fit / Ready：{item.fit} / {item.ready}｜两年资产：{item.asset}**",
-                f"- **优势：** {'；'.join(item.strengths)}",
-                f"- **关键缺口：** {'；'.join(item.gaps)}",
-                f"- **薪酬口径：** {item.salary.label}；{item.salary_gate}",
-                f"- **强度/差旅：** {item.work_risk}",
+                f"- **优势：** {'；'.join(markdown_text(value) for value in item.strengths)}",
+                f"- **关键缺口：** {'；'.join(markdown_text(value) for value in item.gaps)}",
+                f"- **薪酬口径：** {markdown_text(item.salary.label)}；{markdown_text(item.salary_gate)}",
+                f"- **强度/差旅：** {markdown_text(item.work_risk)}",
                 "",
             ]
         )
+
+    if trend_items:
+        lines.extend(["## 非主推｜其他城市 / 海外 / 时效待核验", ""])
+        for item in trend_items:
+            freshness = job_freshness(item.job, config, now)
+            lines.append(
+                f"- {markdown_link(item.job.title, item.job.url)}｜{markdown_text(item.job.location)}｜"
+                f"{markdown_text(item.job.source)}｜Fit/Ready {item.fit}/{item.ready}｜"
+                f"{markdown_text(freshness.label)}｜{markdown_text(item.responsibilities[0])}"
+            )
+        lines.append("")
+
+    lines.extend(["## 招聘平台 / 公众号 / 小红书｜市场信号", ""])
+    if signals:
+        for signal in signals:
+            indexed = parse_timestamp(signal.indexed_at)
+            indexed_label = indexed.date().isoformat() if indexed else "发现日期未知"
+            kind = "岗位线索" if signal.kind == "platform" else "职场/行业内容"
+            lines.append(
+                f"- {markdown_link(signal.title, signal.url)}｜{markdown_text(signal.source)}｜{kind}｜"
+                f"本次发现 {indexed_label}，原文日期待核验｜{markdown_text(signal_excerpt(signal))}"
+            )
+        lines.append("")
+    else:
+        lines.extend(
+            [
+                "本轮没有新的、通过相关性与公开域名校验的索引；不把无日期或无法验证的内容硬凑成趋势。",
+                "",
+            ]
+        )
+
+    themes = Counter(
+        responsibility
+        for item in [*items, *trend_items]
+        for responsibility in item.responsibilities
+    )
+    if themes:
+        lines.append(
+            "**本轮需求信号：** "
+            + "；".join(markdown_text(name) for name, _ in themes.most_common(3))
+        )
     lines.append(
-        f"本轮发现 {discovered_count} 条公开结果；只推送 Fit≥72、Ready≥48 且没有明确身份/薪酬硬冲突的岗位。"
+        f"本轮发现 {discovered_count} 条公开岗位；主推需明确位于北京/天津并仍在招，"
+        "90 天内优先，91–180 天明确提示复核，超过 180 天剔除。"
     )
     if failures:
-        lines.append(f"部分来源失败：{'；'.join(failures[:3])}。其余来源仍已完成。")
+        lines.append(
+            f"部分来源无结果或失败：{'；'.join(markdown_text(value) for value in failures[:3])}。"
+            "其他来源继续独立执行。"
+        )
+    lines.append(
+        "BOSS、猎聘、51job、智联、就业在线、Indeed、LinkedIn、公众号和小红书只作公开索引发现；"
+        "未回到企业官网验活的内容不会被当作可申请岗位。"
+    )
     lines.append("薪酬、双休、21点后工作频率和差旅以招聘方书面确认及面试反向背调为准。")
     return truncate_utf8("\n".join(lines), MAX_MESSAGE_BYTES)
 
