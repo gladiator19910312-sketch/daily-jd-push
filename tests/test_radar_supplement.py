@@ -68,6 +68,15 @@ class RadarSupplementTests(unittest.TestCase):
         self.assertEqual(bundle.coverage[0].queries, 2)
         self.assertEqual(bundle.coverage[1].status, "no_results")
 
+    def test_partial_coverage_may_keep_items_from_successful_queries(self):
+        payload = valid_payload()
+        payload["coverage"][0]["status"] = "partial"
+
+        bundle = parse_supplement(payload, now=NOW)
+
+        self.assertEqual(bundle.coverage[0].status, "partial")
+        self.assertEqual(len(bundle.signals), 1)
+
     def test_loads_file_and_allows_honest_non_clickable_evidence(self):
         payload = valid_payload()
         payload["coverage"] = [
