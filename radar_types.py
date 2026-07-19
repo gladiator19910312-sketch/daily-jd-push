@@ -118,12 +118,37 @@ class Job:
 
 
 @dataclass(frozen=True)
+class SourceCoverage:
+    """One configured official source's outcome for the current scan."""
+
+    source_key: str
+    name: str
+    scope: str
+    status: str
+    count: int
+    diagnostic: str = ""
+
+
+@dataclass(frozen=True)
+class TrendQueryCoverage:
+    """One public-index/content query's observable execution outcome."""
+
+    name: str
+    kind: str
+    status: str
+    raw_count: int
+    accepted_count: int
+
+
+@dataclass(frozen=True)
 class Salary:
     total_low_wan: float | None = None
     total_high_wan: float | None = None
     fixed_low_wan: float | None = None
     fixed_high_wan: float | None = None
     label: str = "未披露"
+    annual_cash_low_wan: float | None = None
+    annual_cash_high_wan: float | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +164,7 @@ class Assessment:
     gaps: tuple[str, ...]
     work_risk: str
     excluded_reason: str | None = None
+    required_experience_years: int | None = None
 
     @property
     def eligible(self) -> bool:
