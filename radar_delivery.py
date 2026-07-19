@@ -17,6 +17,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from radar_market import job_freshness, parse_timestamp
+from radar_supplement import SupplementCoverage
 from radar_types import (
     HTTP_TIMEOUT_SECONDS,
     MAX_MESSAGE_BYTES,
@@ -24,6 +25,7 @@ from radar_types import (
     Assessment,
     TrendSignal,
     is_public_http_url,
+    is_stable_public_signal_url,
 )
 
 
@@ -102,6 +104,39 @@ def markdown_link(label: Any, url: str) -> str:
     return f"[{safe_label}]({safe_url})"
 
 
+COVERAGE_LABELS = {
+    "boss": "BOSS 直聘",
+    "linkedin": "LinkedIn",
+    "maimai": "脉脉",
+    "wechat": "微信公众号",
+    "xiaohongshu": "小红书",
+}
+COVERAGE_STATUSES = {
+    "ok": "已执行",
+    "no_results": "已执行，无合格结果",
+    "auth_required": "需登录 / 未验活",
+    "unsupported": "当前不支持",
+    "error": "执行失败",
+    "skipped": "本轮未执行",
+}
+
+
+def format_source_coverage(rows: list[SupplementCoverage] | tuple[SupplementCoverage, ...]) -> list[str]:
+    lines = ["## Agent Reach 实际覆盖", ""]
+    for row in rows:
+        counters = (
+            f"检索 {row.queries} 次 / 原始 {row.raw_count} 条 / "
+            f"相关 {row.relevant_count} 条 / 正文实读 {row.detail_reads} 条"
+        )
+        summary = f"｜{markdown_text(row.summary)}" if row.summary else ""
+        lines.append(
+            f"- **{COVERAGE_LABELS.get(row.channel, row.channel)}：** "
+            f"{COVERAGE_STATUSES.get(row.status, row.status)}｜{counters}{summary}"
+        )
+    lines.append("")
+    return lines
+
+
 def format_report(
     items: list[Assessment],
     discovered_count: int,
@@ -109,6 +144,7 @@ def format_report(
     *,
     trend_items: list[Assessment] | None = None,
     signals: list[TrendSignal] | None = None,
+    source_coverage: list[SupplementCoverage] | tuple[SupplementCoverage, ...] | None = None,
     config: dict[str, Any] | None = None,
 ) -> str:
     config = config or {}
@@ -153,6 +189,9 @@ def format_report(
             )
         lines.append("")
 
+    if source_coverage:
+        lines.extend(format_source_coverage(source_coverage))
+
     platform_signals = [signal for signal in signals if signal.kind == "platform"]
     content_signals = [signal for signal in signals if signal.kind != "platform"]
     lines.extend(["## 社招高阶线索｜招聘平台 / 公共就业 / 人才网", ""])
@@ -165,16 +204,27 @@ def format_report(
         )
         for signal in platform_signals:
             indexed = parse_timestamp(signal.indexed_at)
-            indexed_label = indexed.date().isoformat() if indexed else "发现日期未知"
+            indexed_label = (
+                indexed.astimezone(timezone).date().isoformat()
+                if indexed
+                else "发现日期未知"
+            )
+            published = parse_timestamp(signal.published_at)
+            published_label = (
+                f"原文日期 {published.astimezone(timezone).date().isoformat()}"
+                if published
+                else "原文日期未披露"
+            )
             lines.append(
-                f"- {markdown_link(signal.title, signal.url)}｜{markdown_text(signal.source)}｜社招岗位线索｜"
-                f"本次发现 {indexed_label}，原文日期待核验｜{markdown_text(signal_excerpt(signal))}"
+                f"- {markdown_link(signal.title, signal.url if is_stable_public_signal_url(signal.url) else '')}｜"
+                f"{markdown_text(signal.source)}｜社招岗位线索｜"
+                f"本次验活 {indexed_label}，{published_label}｜{markdown_text(signal_excerpt(signal))}"
             )
         lines.append("")
     else:
         lines.extend(
             [
-                "本轮没有新的、通过相关性与公开域名校验的索引；不把无日期或无法验证的内容硬凑成趋势。",
+                "本轮未输出任何未经正文验活的平台链接；搜索聚合页、SEO 模板页、安全验证页和空正文一律抑制。",
                 "",
             ]
         )
@@ -183,10 +233,21 @@ def format_report(
     if content_signals:
         for signal in content_signals:
             indexed = parse_timestamp(signal.indexed_at)
-            indexed_label = indexed.date().isoformat() if indexed else "发现日期未知"
+            indexed_label = (
+                indexed.astimezone(timezone).date().isoformat()
+                if indexed
+                else "发现日期未知"
+            )
+            published = parse_timestamp(signal.published_at)
+            published_label = (
+                f"原文日期 {published.astimezone(timezone).date().isoformat()}"
+                if published
+                else "原文日期未披露"
+            )
             lines.append(
-                f"- {markdown_link(signal.title, signal.url)}｜{markdown_text(signal.source)}｜"
-                f"本次发现 {indexed_label}，原文日期待核验｜{markdown_text(signal_excerpt(signal))}"
+                f"- {markdown_link(signal.title, signal.url if is_stable_public_signal_url(signal.url) else '')}｜"
+                f"{markdown_text(signal.source)}｜"
+                f"本次采集/索引 {indexed_label}，{published_label}｜{markdown_text(signal_excerpt(signal))}"
             )
         lines.append("")
     else:
@@ -213,9 +274,8 @@ def format_report(
             "其他来源继续独立执行。"
         )
     lines.append(
-        "BOSS、猎聘、脉脉、51job、智联、国聘、就业在线、各地人才网、Indeed、LinkedIn、"
-        "公众号和小红书只作公开索引发现；"
-        "未回到企业官网验活的内容不会被当作可申请岗位。"
+        "企业官方 ATS / 招聘站用于可行动岗位；本机登录态渠道仅在上方覆盖表显示为“已执行”时才算本轮实际检索。"
+        "社交内容只作未经企业背书的行业证据，未回企业官网验活的内容不会被当作可申请岗位。"
     )
     lines.append("薪酬、双休、21点后工作频率和差旅以招聘方书面确认及面试反向背调为准。")
     return truncate_utf8("\n".join(lines), MAX_MESSAGE_BYTES)

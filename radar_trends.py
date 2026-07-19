@@ -15,7 +15,7 @@ from radar_discovery import bing_rss_url, http_get
 from radar_market import parse_timestamp
 from radar_matching import looks_like_candidate_job, parse_salary, salary_gate
 from radar_search import duckduckgo_lite_url, parse_duckduckgo_results
-from radar_types import Job, TrendSignal, is_public_http_url
+from radar_types import Job, TrendSignal, is_public_http_url, is_stable_public_signal_url
 
 
 AI_TERMS = (
@@ -115,7 +115,11 @@ def discover_trend_signals(config: dict[str, Any]) -> tuple[list[TrendSignal], l
     observed_text = datetime.now(timezone.utc).isoformat(timespec="seconds")
     configured_queries = list(config.get("trend_queries", []))
     content_queries = [query for query in configured_queries if query.get("kind") != "platform"]
-    platform_queries = [query for query in configured_queries if query.get("kind") == "platform"]
+    platform_queries = (
+        [query for query in configured_queries if query.get("kind") == "platform"]
+        if config.get("enable_public_platform_discovery", True)
+        else []
+    )
     ordered_queries: list[dict[str, Any]] = []
     for index in range(max(len(content_queries), len(platform_queries))):
         if index < len(content_queries):
@@ -148,6 +152,7 @@ def discover_trend_signals(config: dict[str, Any]) -> tuple[list[TrendSignal], l
             signal
             for signal in signals
             if signal_url_allowed(signal.url, hosts)
+            and is_stable_public_signal_url(signal.url)
             and signal_is_relevant(signal, config)
             and signal_is_recent(signal, max_age)
         ]
@@ -178,6 +183,7 @@ def discover_trend_signals(config: dict[str, Any]) -> tuple[list[TrendSignal], l
                     signal
                     for signal in fallback
                     if signal_url_allowed(signal.url, hosts)
+                    and is_stable_public_signal_url(signal.url)
                     and signal_is_relevant(signal, config)
                     and signal_is_recent(signal, max_age)
                 ]
