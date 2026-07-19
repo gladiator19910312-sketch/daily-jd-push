@@ -112,11 +112,6 @@ def select_signals(
             chosen.append(signal)
             chosen_sources.add(signal.source)
             if len(chosen) >= limit:
-                return chosen
-        for signal in values:
-            if signal not in chosen:
-                chosen.append(signal)
-            if len(chosen) >= limit:
                 break
         return chosen
 
@@ -136,20 +131,17 @@ def select_signals(
         if signal.source not in selected_sources:
             selected.append(signal)
             selected_sources.add(signal.source)
-    for signal in platform:
-        if len(selected) >= platform_quota:
-            break
-        if signal not in selected:
-            selected.append(signal)
     if content and len(selected) < max_items:
         selected.append(content[0])
+        selected_sources.add(content[0].source)
     selected_ids = {signal.identity for signal in selected}
     for signal in signals:
         if len(selected) >= max_items:
             break
-        if signal.identity not in selected_ids:
+        if signal.identity not in selected_ids and signal.source not in selected_sources:
             selected.append(signal)
             selected_ids.add(signal.identity)
+            selected_sources.add(signal.source)
     return selected
 
 

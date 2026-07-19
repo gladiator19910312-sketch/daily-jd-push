@@ -41,7 +41,12 @@ from job_radar import (
 from radar_market import job_freshness, location_bucket, parse_timestamp
 from radar_ats import parse_lever
 from radar_discovery import fetch_official_source
-from radar_trends import discover_trend_signals, signal_is_recent, signal_is_relevant
+from radar_trends import (
+    discover_trend_signals,
+    platform_signal_url_is_detail,
+    signal_is_recent,
+    signal_is_relevant,
+)
 from radar_types import TrendSignal, normalize_url
 
 
@@ -162,6 +167,22 @@ class JobRadarTests(unittest.TestCase):
         )
         self.assertEqual([signal.kind for signal in selected], ["platform"] * 3 + ["content"] * 2)
 
+    def test_signal_selection_does_not_fill_quota_with_one_platform_source(self):
+        observed = "2026-07-19T04:00:00+00:00"
+        signals = [
+            TrendSignal(
+                f"AI Agent 产品负责人 {index}",
+                f"https://www.zhipin.com/job_detail/{index}.html",
+                "高级社招岗位",
+                "BOSS 岗位线索",
+                "platform",
+                observed,
+            )
+            for index in range(4)
+        ]
+        selected = select_signals(signals, 4, platform_limit=4)
+        self.assertEqual(len(selected), 1)
+
     def test_platform_signal_relevance_rejects_campus_and_intern_roles(self):
         observed = "2026-07-19T04:00:00+00:00"
         campus = TrendSignal(
@@ -182,6 +203,48 @@ class JobRadarTests(unittest.TestCase):
         )
         self.assertFalse(signal_is_relevant(campus))
         self.assertTrue(signal_is_relevant(social))
+
+    def test_platform_signal_rejects_aggregation_engineering_and_low_salary(self):
+        observed = "2026-07-19T04:00:00+00:00"
+        aggregation = TrendSignal(
+            "北京评测产品经理招聘信息",
+            "https://www.zhipin.com/zhaopin/7929bac710c302b603xy3dm8Fw~~/",
+            "AI Agent 产品招聘",
+            "BOSS 岗位线索",
+            "platform",
+            observed,
+        )
+        engineering = TrendSignal(
+            "北京地图评测工程师",
+            "https://www.zhipin.com/job_detail/engineering.html",
+            "Agent 地图评测岗位",
+            "BOSS 岗位线索",
+            "platform",
+            observed,
+        )
+        low_salary = TrendSignal(
+            "AI 数据平台产品经理｜标注评测方向",
+            "https://www.zhipin.com/job_detail/low-salary.html",
+            "20-40K，北京，负责数据标注和模型评测",
+            "BOSS 岗位线索",
+            "platform",
+            observed,
+        )
+        self.assertFalse(platform_signal_url_is_detail(aggregation.url))
+        self.assertFalse(signal_is_relevant(aggregation, CONFIG))
+        self.assertFalse(signal_is_relevant(engineering, CONFIG))
+        self.assertFalse(signal_is_relevant(low_salary, CONFIG))
+
+    def test_boss_queries_target_detail_pages_accepted_by_validator(self):
+        config_path = Path(__file__).resolve().parents[1] / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        boss_queries = [
+            query["query"]
+            for query in config["trend_queries"]
+            if query["kind"] == "platform" and "zhipin.com" in query["query"]
+        ]
+        self.assertGreaterEqual(len(boss_queries), 2)
+        self.assertTrue(all("site:zhipin.com/job_detail/" in query for query in boss_queries))
 
     def test_parse_chinese_monthly_salary(self):
         salary = parse_salary("AI座舱产品经理 50-80K·20薪")

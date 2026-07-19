@@ -18,7 +18,7 @@
   "max_primary_push_jobs": 6,
   "max_trend_push_jobs": 4,
   "max_signal_push_items": 3,
-  "max_platform_signal_items": 8,
+  "max_platform_signal_items": 4,
   "max_content_signal_items": 2,
   "trend_signal_max_age_days": 45,
   "current_fixed_cash_wan": null,
@@ -337,7 +337,7 @@
       "name": "BOSS 岗位线索",
       "kind": "platform",
       "language": "zh-CN",
-      "query": "site:zhipin.com/zhaopin/ 评测产品经理 Agent 北京"
+      "query": "site:zhipin.com/job_detail/ (Agent OR 智能体 OR 大模型 OR 评测) (产品经理 OR 产品专家 OR 产品负责人) 北京 -校招 -应届 -实习"
     },
     {
       "name": "猎聘岗位线索",
@@ -397,7 +397,7 @@
       "name": "高成长 AI 公司薪酬线索",
       "kind": "platform",
       "language": "zh-CN",
-      "query": "site:zhipin.com/job_detail (智谱 OR MiniMax OR 百川智能 OR 零一万物 OR 面壁智能 OR 生数科技) (Agent OR 智能体 OR 大模型) (产品 OR 负责人 OR 专家) (50K OR 60K OR 70K) -校招 -应届 -实习"
+      "query": "site:zhipin.com/job_detail/ (智谱 OR MiniMax OR 百川智能 OR 零一万物 OR 面壁智能 OR 生数科技) (Agent OR 智能体 OR 大模型) (产品 OR 负责人 OR 专家) (50K OR 60K OR 70K) -校招 -应届 -实习"
     },
     {
       "name": "中国公共招聘网社招线索",
@@ -469,7 +469,7 @@
       "name": "BOSS 天津岗位线索",
       "kind": "platform",
       "language": "zh-CN",
-      "query": "site:zhipin.com/zhaopin AI产品经理 Agent 天津"
+      "query": "site:zhipin.com/job_detail/ (Agent OR 智能体 OR 大模型 OR 评测) (产品经理 OR 产品专家 OR 产品负责人) 天津 -校招 -应届 -实习"
     },
     {
       "name": "智联天津岗位线索",
