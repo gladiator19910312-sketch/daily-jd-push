@@ -69,14 +69,14 @@ jobs:
       - name: Prepare sanitized Agent Reach supplement
         id: agent-reach-supplement
         shell: bash
-        env:
-          AGENT_REACH_SUPPLEMENT_B64: ${{ inputs.agent_reach_supplement_b64 || '' }}
         run: |
           set -euo pipefail
           supplement_path="$RUNNER_TEMP/agent-reach-supplement.json"
-          if [[ -n "$AGENT_REACH_SUPPLEMENT_B64" ]]; then
+          supplement_b64="$(jq -r '.inputs.agent_reach_supplement_b64 // empty' "$GITHUB_EVENT_PATH")"
+          if [[ -n "$supplement_b64" ]]; then
             umask 077
-            printf '%s' "$AGENT_REACH_SUPPLEMENT_B64" | base64 --decode > "$supplement_path"
+            printf '%s' "$supplement_b64" | base64 --decode > "$supplement_path"
+            unset supplement_b64
             chmod 600 "$supplement_path"
             echo "path=$supplement_path" >> "$GITHUB_OUTPUT"
           else
