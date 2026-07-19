@@ -1,0 +1,62 @@
+name: Daily Agent Job Radar
+
+on:
+  schedule:
+    # 00:30 UTC = 08:30 Asia/Shanghai
+    - cron: "30 0 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only print the report; do not send DingTalk"
+        type: boolean
+        default: true
+      force_all:
+        description: "Ignore the seen-job cache"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-agent-job-radar
+  cancel-in-progress: false
+
+jobs:
+  scan-and-notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+      CURRENT_FIXED_CASH_WAN: ${{ secrets.CURRENT_FIXED_CASH_WAN }}
+      TARGET_TOTAL_COMP_WAN: ${{ secrets.TARGET_TOTAL_COMP_WAN }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      FORCE_ALL: ${{ inputs.force_all || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Reject committed credentials
+        run: |
+          if git grep -nE 'access_token=[0-9a-fA-F]{32,}|SEC[0-9A-Za-z]{32,}' -- .; then
+            echo "Potential credential committed to the repository."
+            exit 1
+          fi
+
+      - name: Restore seen-job cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/seen_jobs.json
+          key: job-radar-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            job-radar-${{ runner.os }}-
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Scan and notify
+        run: python job_radar.py --config config.json
