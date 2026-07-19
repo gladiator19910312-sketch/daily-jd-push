@@ -55,10 +55,12 @@ jobs:
             exit 1
           fi
 
-      - name: Restore seen-job cache
+      - name: Restore radar state cache
         uses: actions/cache@v4
         with:
-          path: .cache/seen_jobs.json
+          path: |
+            .cache/seen_jobs.json
+            .cache/market_history.json
           key: job-radar-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             job-radar-${{ runner.os }}-

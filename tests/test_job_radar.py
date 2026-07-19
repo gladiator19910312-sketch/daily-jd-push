@@ -11,6 +11,7 @@ import radar_matching
 from job_radar import (
     Job,
     assess_job,
+    delivered_seen_identities,
     enrich_jobs,
     format_report,
     load_seen,
@@ -45,6 +46,7 @@ from radar_ats import parse_lever
 from radar_discovery import fetch_official_source
 from radar_trends import (
     discover_trend_signals,
+    discover_trend_signals_with_coverage,
     platform_signal_url_is_detail,
     signal_is_recent,
     signal_is_relevant,
@@ -222,6 +224,24 @@ class JobRadarTests(unittest.TestCase):
 
         self.assertEqual(selected, [xhs[0], xhs[1], wechat, public])
 
+    def test_signal_selection_allows_two_items_with_same_wechat_label(self):
+        observed = "2026-07-19T04:00:00+00:00"
+        signals = [
+            TrendSignal(
+                f"Agent 高阶人才观察 {index}",
+                "",
+                f"Agent 产品社招、评测与人才趋势，第 {index} 组证据。",
+                "微信公众号（Agent Reach 检索摘要）",
+                "content",
+                observed,
+            )
+            for index in range(3)
+        ]
+
+        selected = select_signals(signals, 3, content_limit=3)
+
+        self.assertEqual(selected, signals[:2])
+
     def test_platform_signal_relevance_rejects_campus_and_intern_roles(self):
         observed = "2026-07-19T04:00:00+00:00"
         campus = TrendSignal(
@@ -287,24 +307,99 @@ class JobRadarTests(unittest.TestCase):
 
     def test_parse_chinese_monthly_salary(self):
         salary = parse_salary("AI座舱产品经理 50-80K·20薪")
-        self.assertEqual(salary.total_high_wan, 160.0)
+        self.assertIsNone(salary.total_high_wan)
         self.assertEqual(salary.fixed_high_wan, 96.0)
+        self.assertIn("名义年现金 100–160万", salary.label)
 
     def test_parse_us_salary(self):
         salary = parse_salary("Base $163K - $237K + equity", usd_cny=7.0)
-        self.assertEqual(salary.total_low_wan, 114.1)
-        self.assertEqual(salary.total_high_wan, 165.9)
+        self.assertIsNone(salary.total_low_wan)
+        self.assertIsNone(salary.total_high_wan)
+        self.assertEqual(salary.fixed_low_wan, 114.1)
+        self.assertEqual(salary.fixed_high_wan, 165.9)
 
     def test_parse_full_usd_salary(self):
         salary = parse_salary("The base salary range is $204,000 - $259,000 per year", usd_cny=7.0)
-        self.assertEqual(salary.total_low_wan, 142.8)
-        self.assertEqual(salary.total_high_wan, 181.3)
+        self.assertIsNone(salary.total_low_wan)
+        self.assertIsNone(salary.total_high_wan)
+        self.assertEqual(salary.fixed_low_wan, 142.8)
+        self.assertEqual(salary.fixed_high_wan, 181.3)
+
+    def test_monthly_base_above_fixed_floor_is_not_rejected_as_low_total_comp(self):
+        salary = parse_salary("100-110K")
+        label, rejected = salary_gate(salary, CONFIG)
+
+        self.assertEqual(salary.fixed_low_wan, 120.0)
+        self.assertEqual(salary.fixed_high_wan, 132.0)
+        self.assertIsNone(salary.total_high_wan)
+        self.assertFalse(rejected)
+        self.assertIn("奖金/股票未披露", label)
+
+    def test_product_scale_k_users_is_not_parsed_as_salary(self):
+        salary = parse_salary("Serve 10-50K users and own Agent reliability")
+
+        self.assertEqual(salary.label, "未披露")
+        self.assertIsNone(salary.fixed_high_wan)
+
+    def test_bare_k_range_can_still_represent_platform_salary(self):
+        salary = parse_salary("薪资 50-100K，另有奖金和股票")
+
+        self.assertEqual(salary.fixed_low_wan, 60.0)
+        self.assertEqual(salary.fixed_high_wan, 120.0)
 
     def test_fixed_cash_below_floor_is_excluded_even_if_nominal_total_passes(self):
         salary = parse_salary("50-80K·20薪")
         label, rejected = salary_gate(salary, CONFIG)
         self.assertTrue(rejected)
         self.assertIn("12个月固定上沿", label)
+
+    def test_n_salary_cash_below_total_target_is_not_rejected_when_fixed_floor_passes(self):
+        salary = parse_salary("100-110K×12薪")
+        label, rejected = salary_gate(salary, CONFIG)
+
+        self.assertFalse(rejected)
+        self.assertIsNone(salary.total_high_wan)
+        self.assertEqual(salary.fixed_high_wan, 132.0)
+        self.assertIn("奖金/股票未披露", label)
+
+    def test_explicit_total_comp_range_can_trigger_total_comp_gate(self):
+        salary = parse_salary("总包 100-110K×12薪")
+        label, rejected = salary_gate(salary, CONFIG)
+
+        self.assertTrue(rejected)
+        self.assertEqual(salary.total_high_wan, 132.0)
+        self.assertIn("低于", label)
+
+    def test_generic_annual_cash_is_not_misclassified_as_total_comp(self):
+        salary = parse_salary("公开年薪范围 130-140万元/年，另有绩效奖金和上市公司股票")
+        label, rejected = salary_gate(salary, CONFIG)
+
+        self.assertIsNone(salary.total_high_wan)
+        self.assertIsNone(salary.fixed_high_wan)
+        self.assertEqual(salary.annual_cash_high_wan, 140.0)
+        self.assertFalse(rejected)
+        self.assertIn("年现金口径待确认", salary.label)
+        self.assertIn("固定现金、奖金和股权拆分待核验", label)
+
+    def test_explicit_annual_total_comp_still_triggers_total_gate(self):
+        salary = parse_salary("该岗位总包约 130-140万元/年")
+        config = {**CONFIG, "target_total_comp_wan": 150.0}
+        label, rejected = salary_gate(salary, config)
+
+        self.assertEqual(salary.total_high_wan, 140.0)
+        self.assertTrue(rejected)
+        self.assertIn("明确总包口径", salary.label)
+        self.assertIn("低于", label)
+
+    def test_explicit_annual_base_is_fixed_cash_not_total_comp(self):
+        salary = parse_salary("基本工资 130-140万元/年，奖金和股票另计")
+        label, rejected = salary_gate(salary, CONFIG)
+
+        self.assertIsNone(salary.total_high_wan)
+        self.assertEqual(salary.fixed_high_wan, 140.0)
+        self.assertFalse(rejected)
+        self.assertIn("固定现金", salary.label)
+        self.assertIn("奖金/股票未披露", label)
 
     def test_ideal_role_scores_high(self):
         job = Job(
@@ -316,6 +411,154 @@ class JobRadarTests(unittest.TestCase):
         result = assess_job(job, CONFIG)
         self.assertGreaterEqual(result.fit, 80)
         self.assertTrue(result.eligible)
+
+    def test_differently_named_senior_pm_with_explicit_agent_eval_ownership_is_recalled(self):
+        job = Job(
+            "Principal Product Manager",
+            "https://example.com/jobs/principal-pm",
+            "Own end-to-end Agent evaluation roadmap, Benchmark, reliability, launch and business outcomes.",
+            "test",
+        )
+
+        result = assess_job(job, CONFIG)
+
+        self.assertGreaterEqual(result.fit, 72)
+        self.assertTrue(result.eligible)
+        self.assertIn("Agent Benchmark", result.asset)
+
+    def test_heavy_people_management_role_is_excluded_from_ic_track(self):
+        job = Job(
+            "Director, Agent Evaluation Product",
+            "https://example.com/jobs/people-manager",
+            "Own Agent evals and reliability. Manage 8 direct reports and own hiring, "
+            "performance reviews, succession planning, and organization design.",
+            "test",
+        )
+
+        result = assess_job(job, CONFIG)
+
+        self.assertFalse(result.eligible)
+        self.assertIn("重人员管理", result.excluded_reason)
+        self.assertIn("直属团队", result.gaps[0])
+
+    def test_cross_functional_leadership_without_direct_reports_stays_eligible(self):
+        job = Job(
+            "Senior Product Manager, Agent Evals",
+            "https://example.com/jobs/ic-lead",
+            "Own Agent evaluation roadmap and lead a cross-functional working group. "
+            "This is an IC role with no direct reports and no people management.",
+            "test",
+        )
+
+        result = assess_job(job, CONFIG)
+
+        self.assertTrue(result.eligible)
+        self.assertNotIn("重人员管理", result.excluded_reason or "")
+
+    def test_experience_floor_parser_handles_common_english_and_chinese_jds(self):
+        cases = (
+            ("10+ years of product management experience required.", 10),
+            ("Minimum of 12 years of relevant experience.", 12),
+            ("至少 12 年以上相关产品经验。", 12),
+            ("工作经验 6-8 年，负责 Agent 产品。", 6),
+        )
+        for requirement, expected in cases:
+            with self.subTest(requirement=requirement):
+                job = Job(
+                    "Senior Product Manager, Agent Evals",
+                    "https://example.com/jobs/experience-floor",
+                    f"Own Agent evaluation and Benchmark roadmap. {requirement}",
+                    "test",
+                )
+                result = assess_job(job, CONFIG)
+
+                self.assertEqual(result.required_experience_years, expected)
+                if expected >= 5:
+                    self.assertIn(f"{expected} 年以上", result.gaps[0])
+
+    def test_company_age_is_not_misread_as_experience_floor(self):
+        job = Job(
+            "Senior Product Manager, Agent Evals",
+            "https://example.com/jobs/company-age",
+            "The company was founded 12 years ago. Requires 3 years of product experience. "
+            "Own Agent evaluation roadmap.",
+            "test",
+        )
+
+        result = assess_job(job, CONFIG)
+
+        self.assertEqual(result.required_experience_years, 3)
+        self.assertNotIn("12 年以上", "；".join(result.gaps))
+
+    def test_explicit_double_weekends_no_travel_and_no_on_call_are_preserved(self):
+        job = Job(
+            "Senior Product Manager, Agent Evals",
+            "https://example.com/jobs/healthy-boundaries",
+            "Own Agent evaluation roadmap. Five-day workweek with weekends off. "
+            "No business travel required. This is not an on-call role.",
+            "test",
+        )
+
+        result = assess_job(job, CONFIG)
+
+        self.assertTrue(result.eligible)
+        self.assertEqual(result.work_risk, "明确双休；明确无出差；明确无 on-call")
+
+    def test_on_call_cross_timezone_and_travel_percentage_are_strong_risks(self):
+        job = Job(
+            "Senior Product Manager, Agent Evals",
+            "https://example.com/jobs/boundary-risks",
+            "Own Agent evaluation roadmap. Rotating on-call coverage, collaboration across "
+            "global time zones, and business travel up to 30%.",
+            "test",
+        )
+
+        result = assess_job(job, CONFIG)
+
+        self.assertIn("on-call/值班", result.work_risk)
+        self.assertIn("跨时区协作", result.work_risk)
+        self.assertIn("差旅上限 ≤30%", result.work_risk)
+        self.assertIn("高频差旅", result.excluded_reason)
+
+    def test_less_than_25_percent_travel_is_a_risk_not_a_hard_exclusion(self):
+        job = Job(
+            "Principal Product Manager, Agent Evals",
+            "https://example.com/jobs/limited-travel",
+            "Own Agent evaluation roadmap, Benchmark and reliability. Travel: Less than 25%.",
+            "test",
+        )
+
+        result = assess_job(job, CONFIG)
+
+        self.assertTrue(result.eligible)
+        self.assertIn("差旅上限 <25%", result.work_risk)
+        self.assertNotIn("高频差旅", result.excluded_reason or "")
+
+    def test_unknown_work_boundaries_remain_unknown(self):
+        job = Job(
+            "Senior Product Manager, Agent Evals",
+            "https://example.com/jobs/unknown-boundaries",
+            "Own Agent evaluation roadmap, Benchmark and reliability.",
+            "test",
+        )
+
+        self.assertEqual(assess_job(job, CONFIG).work_risk, "工时/差旅未披露")
+
+    def test_asset_is_specific_and_only_top_two_gaps_are_kept(self):
+        job = Job(
+            "Staff Product Manager, Agent Evals",
+            "https://example.com/jobs/asset-and-gaps",
+            "Own end-to-end Agent evaluation roadmap, Benchmark, launch, Python prototypes, "
+            "tool use and API product. Requires 10+ years of product management experience.",
+            "test",
+        )
+
+        result = assess_job(job, CONFIG)
+
+        self.assertEqual(result.asset, "Agent Benchmark、失败归因与上线闭环案例")
+        self.assertEqual(len(result.gaps), 2)
+        self.assertIn("10 年以上", result.gaps[0])
+        self.assertIn("编码/原型", result.gaps[1])
 
     def test_article_title_is_not_a_product_job(self):
         article = Job(
@@ -472,6 +715,32 @@ class JobRadarTests(unittest.TestCase):
         self.assertTrue(assessment.eligible)
         self.assertEqual(ranked, [assessment])
 
+    def test_title_only_official_job_cannot_become_actionable(self):
+        config = {
+            **CONFIG,
+            "fit_threshold": 62,
+            "ready_threshold": 42,
+            "global_fit_threshold": 72,
+            "require_official_source": True,
+        }
+        thin = assess_job(
+            Job(
+                "高级 Agent 产品经理",
+                "https://careers.example.com/jobs/thin",
+                "",
+                "Example 官方",
+                location="北京",
+                scope="china",
+                official=True,
+                active=True,
+                published_at="2026-07-19",
+                date_basis="published",
+            ),
+            config,
+        )
+
+        self.assertEqual(radar_matching.rank_assessments([thin], config), [])
+
     def test_fde_is_excluded(self):
         job = Job(
             "Forward Deployed Engineer",
@@ -522,6 +791,34 @@ class JobRadarTests(unittest.TestCase):
         second = assess_job(Job("Agent Product Manager", "https://e/3", "Agent evals", "B"), CONFIG)
         selected = select_diverse_assessments([first, duplicate, second], 2)
         self.assertEqual([item.job.source for item in selected], ["A", "B"])
+
+    def test_unshown_primary_jobs_remain_in_rotation(self):
+        candidates = [
+            assess_job(
+                Job(
+                    "Agent Product Manager",
+                    f"https://example.com/jobs/{index}",
+                    "Own Agent evals, reliability and end-to-end product outcomes.",
+                    f"Employer {index}",
+                ),
+                CONFIG,
+            )
+            for index in range(7)
+        ]
+        first_day = select_diverse_assessments(candidates, 6)
+        seen = delivered_seen_identities(first_day, [], [], [])
+        second_day_candidates = [
+            item
+            for item in candidates
+            if not was_seen(seen, "primary", item.job.identity)
+        ]
+
+        self.assertEqual(len(first_day), 6)
+        self.assertEqual(len(second_day_candidates), 1)
+        self.assertNotIn(
+            f"primary:{second_day_candidates[0].job.identity}",
+            seen,
+        )
 
     def test_location_bucket_prioritizes_beijing_and_tianjin(self):
         self.assertEqual(location_bucket(Job("PM", "https://e/1", "", "A", location="北京 / 上海"), CONFIG), "primary")
@@ -577,7 +874,7 @@ class JobRadarTests(unittest.TestCase):
         <pubDate>Sat, 18 Jul 2026 08:00:00 GMT</pubDate>
         </item></channel></rss>"""
         mock_get.side_effect = [urllib.error.URLError("blocked"), fallback]
-        signals, failures = discover_trend_signals(
+        signals, failures, coverage = discover_trend_signals_with_coverage(
             {
                 "max_results_per_query": 3,
                 "trend_signal_max_age_days": 45,
@@ -591,10 +888,28 @@ class JobRadarTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(parse_timestamp(signals[0].indexed_at).date(), datetime.now(timezone.utc).date())
 
+    @patch("radar_trends.http_get", return_value=b"<html><body></body></html>")
+    def test_successful_empty_public_search_is_not_reported_as_source_failure(self, _mock_get):
+        signals, failures, coverage = discover_trend_signals_with_coverage(
+            {
+                "max_results_per_query": 3,
+                "trend_signal_max_age_days": 45,
+                "trend_signal_hosts": ["example.com"],
+                "trend_queries": [
+                    {"name": "report", "kind": "content", "query": "Agent hiring report"}
+                ],
+            }
+        )
+
+        self.assertEqual(signals, [])
+        self.assertEqual(failures, [])
+        self.assertEqual(coverage[0].status, "no_results")
+
     @patch("radar_trends.http_get")
     def test_public_platform_discovery_can_be_disabled(self, mock_get):
-        signals, failures = discover_trend_signals(
+        signals, failures, coverage = discover_trend_signals_with_coverage(
             {
+                **CONFIG,
                 "enable_public_platform_discovery": False,
                 "trend_signal_hosts": ["www.zhipin.com"],
                 "trend_queries": [
@@ -608,7 +923,115 @@ class JobRadarTests(unittest.TestCase):
         )
         self.assertEqual(signals, [])
         self.assertEqual(failures, [])
+        self.assertEqual(len(coverage), 1)
+        self.assertEqual(coverage[0].name, "BOSS")
+        self.assertEqual(coverage[0].status, "skipped_disabled")
+        self.assertEqual((coverage[0].raw_count, coverage[0].accepted_count), (0, 0))
         mock_get.assert_not_called()
+
+    @patch("radar_trends.http_get")
+    def test_named_liepin_queries_run_while_other_platforms_stay_disabled(self, mock_get):
+        payload = """<html><body><table>
+        <tr><td><a rel="nofollow" href="https://www.liepin.com/a/77939203.shtml?d_sfrom=search" class="result-link">AI Agent 高级产品经理</a></td></tr>
+        <tr><td class="result-snippet">北京社招岗位，负责 Agent 评测、多模态与产品闭环。</td></tr>
+        </table></body></html>""".encode()
+        mock_get.return_value = payload
+
+        signals, failures, coverage = discover_trend_signals_with_coverage(
+            {
+                **CONFIG,
+                "enable_public_platform_discovery": False,
+                "enabled_platform_query_names": ["猎聘猎头·北京"],
+                "trend_signal_hosts": ["www.liepin.com", "www.zhipin.com"],
+                "trend_queries": [
+                    {"name": "BOSS", "kind": "platform", "query": "site:zhipin.com Agent"},
+                    {
+                        "name": "猎聘猎头·北京",
+                        "kind": "platform",
+                        "query": "site:liepin.com/a/ Agent 产品经理 北京",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].url, "https://www.liepin.com/a/77939203.shtml")
+        self.assertIn("公开搜索索引", signals[0].source)
+        self.assertIn("需打开确认", signals[0].summary)
+        self.assertEqual(mock_get.call_count, 1)
+        self.assertEqual(len(coverage), 2)
+        coverage_by_name = {row.name: row for row in coverage}
+        self.assertEqual(coverage_by_name["BOSS"].status, "skipped_disabled")
+        self.assertEqual(coverage_by_name["猎聘猎头·北京"].status, "ok")
+        self.assertEqual(coverage_by_name["猎聘猎头·北京"].raw_count, 1)
+        self.assertEqual(coverage_by_name["猎聘猎头·北京"].accepted_count, 1)
+
+    @patch("radar_trends.http_get")
+    def test_every_configured_disabled_platform_query_gets_a_coverage_row(self, mock_get):
+        names = (
+            "猎聘公开索引",
+            "51job 岗位线索",
+            "智联岗位线索",
+            "LinkedIn 行业岗位",
+            "Indeed 中国岗位",
+            "国聘岗位线索",
+            "就业在线岗位线索",
+        )
+
+        signals, failures, coverage = discover_trend_signals_with_coverage(
+            {
+                **CONFIG,
+                "enable_public_platform_discovery": False,
+                "enabled_platform_query_names": [],
+                "trend_queries": [
+                    {"name": name, "kind": "platform", "query": f"site:example.com {name}"}
+                    for name in names
+                ],
+            }
+        )
+
+        self.assertEqual(signals, [])
+        self.assertEqual(failures, [])
+        self.assertEqual({row.name for row in coverage}, set(names))
+        self.assertTrue(all(row.status == "skipped_disabled" for row in coverage))
+        self.assertTrue(all(row.raw_count == row.accepted_count == 0 for row in coverage))
+        mock_get.assert_not_called()
+
+    def test_liepin_accepts_only_stable_direct_detail_paths(self):
+        self.assertTrue(platform_signal_url_is_detail("https://www.liepin.com/job/1983826957.shtml"))
+        self.assertTrue(platform_signal_url_is_detail("https://www.liepin.com/a/77939203.shtml"))
+        self.assertFalse(platform_signal_url_is_detail("https://www.liepin.com/city-bj/career/AIchanpinjingli/"))
+        self.assertFalse(platform_signal_url_is_detail("https://www.liepin.com/zhaopin/?key=Agent"))
+
+    def test_liepin_rejects_seo_template_even_on_detail_shaped_url(self):
+        signal = TrendSignal(
+            "[Agent评测产品经理招聘]_2026北京Agent评测产品经理",
+            "https://www.liepin.com/job/1975701025.shtml",
+            "猎聘为您推荐更多Agent评测产品经理相似职位，展现2026北京招聘信息，想找Agent岗位请上猎聘。",
+            "猎聘公开索引",
+            "platform",
+            "2026-07-19T04:00:00+00:00",
+        )
+
+        self.assertFalse(signal_is_relevant(signal, CONFIG))
+
+    def test_config_enables_only_liepin_public_index_queries(self):
+        config = json.loads(
+            (Path(__file__).resolve().parents[1] / "config.json").read_text(encoding="utf-8")
+        )
+        by_name = {query["name"]: query for query in config["trend_queries"]}
+        enabled = config["enabled_platform_query_names"]
+
+        self.assertFalse(config["enable_public_platform_discovery"])
+        self.assertEqual(config["max_platform_signal_items"], 3)
+        self.assertGreaterEqual(len(enabled), 2)
+        for name in enabled:
+            self.assertIn(name, by_name)
+            self.assertIn("site:www.liepin.com/", by_name[name]["query"])
+            self.assertTrue(
+                "/job/" in by_name[name]["query"] or "/a/" in by_name[name]["query"]
+            )
 
     def test_salary_below_target_is_excluded(self):
         job = Job(
@@ -1159,8 +1582,8 @@ class JobRadarTests(unittest.TestCase):
             CONFIG,
         )
         report = format_report([assessment], 1, [], config=CONFIG)
-        self.assertIn("岗位重点", report)
-        self.assertIn("薪酬口径", report)
+        self.assertIn("核心任务", report)
+        self.assertIn("薪酬", report)
         self.assertIn("北京 / 天津", report)
         self.assertLessEqual(len(report.encode("utf-8")), 16000)
 

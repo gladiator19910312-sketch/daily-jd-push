@@ -6,6 +6,7 @@ import html
 import json
 import re
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from radar_market import parse_timestamp
@@ -44,6 +45,343 @@ def timestamp_text(value: Any) -> str:
 
 def source_company(source: dict[str, Any]) -> str:
     return str(source.get("company") or source["name"]).replace("官方", "").strip()
+
+
+def truthy_flag(value: Any) -> bool:
+    return value is True or str(value or "").strip().casefold() in {
+        "1", "true", "yes", "y", "on",
+    }
+
+
+def amazon_posted_at(value: Any) -> str:
+    """Normalize the human-readable dates returned by Amazon Jobs search."""
+    if value in (None, ""):
+        return ""
+    parsed = parse_timestamp(value)
+    if parsed:
+        return parsed.isoformat()
+    text = str(value).strip()
+    for pattern in ("%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.strptime(text, pattern).replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def amazon_country_codes(raw: dict[str, Any]) -> set[str]:
+    values: list[Any] = [raw.get("country_code")]
+    locations = raw.get("locations")
+    if isinstance(locations, list):
+        for location in locations:
+            if isinstance(location, str):
+                try:
+                    location = json.loads(location)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(location, dict):
+                values.extend(
+                    (
+                        location.get("country_code"),
+                        location.get("countryCode"),
+                        location.get("normalizedCountryCode"),
+                        location.get("countryIso3a"),
+                    )
+                )
+    return {str(value).strip().upper() for value in values if value}
+
+
+def amazon_location(raw: dict[str, Any]) -> str:
+    values: list[str] = []
+    locations = raw.get("locations")
+    if isinstance(locations, list):
+        for location in locations:
+            if isinstance(location, str):
+                try:
+                    decoded = json.loads(location)
+                except json.JSONDecodeError:
+                    decoded = location.strip()
+                location = decoded
+            if isinstance(location, str) and location:
+                values.append(location)
+                continue
+            if not isinstance(location, dict):
+                continue
+            normalized = str(
+                location.get("normalizedLocation")
+                or location.get("normalized_location")
+                or location.get("locationNonStemming")
+                or location.get("location")
+                or ""
+            ).strip()
+            place = normalized or compact_location(
+                (
+                    location.get("country"),
+                    location.get("state"),
+                    location.get("region"),
+                    location.get("city"),
+                )
+            )
+            if place != "未披露":
+                values.append(place)
+    if values:
+        return " / ".join(dict.fromkeys(value for value in values if value))
+    for key in ("normalized_location", "location", "job_location", "city"):
+        if raw.get(key):
+            return str(raw[key]).strip()
+    return "未披露"
+
+
+def amazon_job_url(raw: dict[str, Any]) -> str:
+    value = str(raw.get("job_path") or raw.get("url") or "").strip()
+    url = urllib.parse.urljoin("https://www.amazon.jobs/", value)
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or (parsed.hostname or "").casefold() not in {"amazon.jobs", "www.amazon.jobs"}
+        or not re.fullmatch(
+            r"/(?:[a-z]{2}(?:-[a-z]{2})?/)?jobs/\d+(?:/[^?#]*)?",
+            parsed.path,
+            flags=re.IGNORECASE,
+        )
+    ):
+        return ""
+    return urllib.parse.urlunsplit(("https", parsed.netloc.casefold(), parsed.path, "", ""))
+
+
+def parse_amazon(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], int]:
+    """Parse live mainland-China roles from Amazon's public jobs search API."""
+    data = json_object(payload)
+    raw_jobs = data.get("jobs")
+    if not isinstance(raw_jobs, list):
+        raise ValueError("Amazon response has no jobs list")
+    jobs: list[Job] = []
+    for raw in raw_jobs:
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("status") or "").strip().casefold()
+        schedule = "\n".join(
+            str(raw.get(key) or "")
+            for key in (
+                "employment_type", "job_type", "job_schedule_type", "schedule_type",
+            )
+        )
+        if (
+            raw.get("active") is False
+            or raw.get("is_active") is False
+            or raw.get("can_apply") is False
+            or status in {"closed", "expired", "inactive", "filled", "archived"}
+            or truthy_flag(raw.get("is_intern"))
+            or truthy_flag(raw.get("university_job"))
+            or bool(
+                re.search(
+                    r"(?i)\bintern(?:ship)?\b|part[ -]?time|temporary|seasonal|contract",
+                    schedule,
+                )
+            )
+            or "CHN" not in amazon_country_codes(raw)
+        ):
+            continue
+        job_id = str(raw.get("id_icims") or raw.get("id") or "").strip()
+        url = amazon_job_url(raw)
+        summary = strip_html(
+            "\n".join(
+                str(raw.get(key) or "")
+                for key in (
+                    "description",
+                    "basic_qualifications",
+                    "preferred_qualifications",
+                )
+                if raw.get(key)
+            )
+        )
+        posted_at = amazon_posted_at(raw.get("posted_date") or raw.get("date_posted"))
+        job = Job(
+            title=str(raw.get("title") or "").strip(),
+            url=url,
+            summary=summary,
+            source=str(source["name"]),
+            job_id=job_id,
+            location=amazon_location(raw),
+            scope=str(source.get("scope", "china")),
+            official=True,
+            source_key=str(source.get("key", source["name"])),
+            company=source_company(source),
+            published_at=posted_at,
+            date_basis="published" if posted_at else "unknown",
+            active=True,
+        )
+        if (
+            job.title
+            and job_id
+            and job.url
+            and len(job.summary) >= 80
+            and looks_like_candidate_job(job)
+        ):
+            jobs.append(job)
+    try:
+        total = int(data.get("hits") or len(raw_jobs))
+    except (TypeError, ValueError):
+        total = len(raw_jobs)
+    return jobs, total
+
+
+def microsoft_job_url(value: Any) -> str:
+    url = urllib.parse.urljoin(
+        "https://apply.careers.microsoft.com/",
+        str(value or "").strip(),
+    )
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or (parsed.hostname or "").casefold() != "apply.careers.microsoft.com"
+        or not re.fullmatch(r"/careers/job/\d+", parsed.path)
+    ):
+        return ""
+    return urllib.parse.urlunsplit(("https", parsed.netloc.casefold(), parsed.path, "", ""))
+
+
+def microsoft_location(raw: dict[str, Any]) -> str:
+    raw_locations = raw.get("locations")
+    if isinstance(raw_locations, list):
+        locations = [str(value).strip() for value in raw_locations if value]
+        if locations:
+            return " / ".join(dict.fromkeys(locations))
+    return str(raw.get("location") or "未披露").strip() or "未披露"
+
+
+def microsoft_is_mainland(raw: dict[str, Any]) -> bool:
+    values: list[Any] = []
+    for key in ("location", "locations", "standardizedLocations"):
+        value = raw.get(key)
+        values.extend(value if isinstance(value, list) else (value,))
+    folded = "\n".join(str(value).casefold() for value in values if value)
+    if any(region in folded for region in ("hong kong", "macao", "macau", "taiwan")) and not any(
+        city in folded
+        for city in ("beijing", "shanghai", "shenzhen", "guangzhou", "suzhou")
+    ):
+        return False
+    return (
+        "china," in folded
+        or folded.startswith("china")
+        or ", china" in folded
+        or folded.endswith(" china")
+        or ", cn" in folded
+    )
+
+
+def parse_microsoft_search(payload: bytes, source: dict[str, Any]) -> tuple[list[Job], int]:
+    """Parse discovery candidates; callers must confirm every item via the detail API."""
+    response = json_object(payload)
+    data = response.get("data")
+    if response.get("status") != 200 or not isinstance(data, dict):
+        raise ValueError("Microsoft search response is not successful")
+    raw_jobs = data.get("positions")
+    if not isinstance(raw_jobs, list):
+        raise ValueError("Microsoft search response has no positions list")
+    jobs: list[Job] = []
+    for raw in raw_jobs:
+        if not isinstance(raw, dict) or not microsoft_is_mainland(raw):
+            continue
+        job_id = str(raw.get("id") or "").strip()
+        job = Job(
+            title=str(raw.get("name") or "").strip(),
+            url=microsoft_job_url(raw.get("positionUrl")),
+            summary=strip_html(
+                "\n".join(
+                    str(raw.get(key) or "")
+                    for key in ("department", "workLocationOption", "locationFlexibility")
+                    if raw.get(key)
+                )
+            ),
+            source=str(source["name"]),
+            job_id=job_id,
+            location=microsoft_location(raw),
+            scope=str(source.get("scope", "china")),
+            official=True,
+            source_key=str(source.get("key", source["name"])),
+            company=source_company(source),
+            published_at=timestamp_text(raw.get("postedTs") or raw.get("creationTs")),
+            date_basis="published" if raw.get("postedTs") else "created" if raw.get("creationTs") else "unknown",
+            active=False,
+        )
+        if job.title and job_id and job.url and looks_like_candidate_job(job):
+            jobs.append(job)
+    try:
+        total = int(data.get("count") or len(raw_jobs))
+    except (TypeError, ValueError):
+        total = len(raw_jobs)
+    return jobs, total
+
+
+def microsoft_text_list(raw: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, list):
+            text = ", ".join(str(item).strip() for item in value if item)
+        else:
+            text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def parse_microsoft_detail(
+    payload: bytes,
+    source: dict[str, Any],
+    expected_job_id: str = "",
+) -> Job:
+    response = json_object(payload)
+    raw = response.get("data")
+    if response.get("status") != 200 or not isinstance(raw, dict):
+        raise ClosedJobError("Microsoft detail is unavailable")
+    job_id = str(raw.get("id") or "").strip()
+    if expected_job_id and job_id != str(expected_job_id):
+        raise ValueError("Microsoft detail id does not match search result")
+    user_actions = raw.get("positionUserActions")
+    apply_action = user_actions.get("applyAction") if isinstance(user_actions, dict) else {}
+    apply_status = str(
+        apply_action.get("status") if isinstance(apply_action, dict) else ""
+    ).casefold()
+    employment = microsoft_text_list(raw, "efcustomTextEmploymentType", "employmentType")
+    allowed_statuses = source.get("active_apply_statuses", ("log_in",))
+    if isinstance(allowed_statuses, str):
+        allowed_statuses = (allowed_statuses,)
+    if apply_status not in {str(value).casefold() for value in allowed_statuses} or re.search(
+        r"(?i)intern(?:ship)?|part[ -]?time|temp(?:orary)?|contract",
+        employment,
+    ):
+        raise ClosedJobError("Microsoft detail confirms the listing is closed or out of scope")
+    metadata = [
+        ("Travel", microsoft_text_list(raw, "efcustomTextRequiredTravel", "travel")),
+        ("Work site", microsoft_text_list(raw, "efcustomTextWorkSite", "workLocationOption")),
+        ("Role type", microsoft_text_list(raw, "efcustomTextRoletype", "role")),
+        ("Employment", employment),
+        ("Profession", microsoft_text_list(raw, "efcustomTextCurrentProfession", "profession")),
+    ]
+    description = strip_html(str(raw.get("jobDescription") or ""))
+    details = ". ".join(f"{label}: {value}" for label, value in metadata if value)
+    summary = "\n".join(value for value in (description, details) if value)
+    job = Job(
+        title=str(raw.get("name") or "").strip(),
+        url=microsoft_job_url(raw.get("publicUrl") or raw.get("positionUrl")),
+        summary=summary,
+        source=str(source["name"]),
+        job_id=job_id,
+        location=microsoft_location(raw),
+        scope=str(source.get("scope", "china")),
+        official=True,
+        source_key=str(source.get("key", source["name"])),
+        company=source_company(source),
+        published_at=timestamp_text(raw.get("postedTs") or raw.get("creationTs")),
+        date_basis="published" if raw.get("postedTs") else "created" if raw.get("creationTs") else "unknown",
+        active=True,
+    )
+    if not job.title or not job_id or not job.url or len(description) < 80:
+        raise ValueError("Microsoft detail is missing a substantive public job description")
+    if not microsoft_is_mainland(raw) or not looks_like_candidate_job(job):
+        raise ClosedJobError("Microsoft detail is outside the configured role or location scope")
+    return job
 
 
 def official_job_url_allowed(

@@ -15,7 +15,7 @@ from radar_types import TrendSignal, is_public_http_url, normalize_url
 
 
 ALLOWED_STATUSES = {
-    "ok", "no_results", "auth_required", "unsupported", "error", "skipped",
+    "ok", "partial", "no_results", "auth_required", "unsupported", "error", "skipped",
 }
 CHANNEL_HOSTS = {
     "boss": {"www.zhipin.com", "m.zhipin.com"},
@@ -260,8 +260,8 @@ def parse_supplement(
         coverage_row = by_channel.get(channel)
         if channel not in CHANNEL_HOSTS or kind not in {"content", "platform"}:
             raise SupplementValidationError(f"items[{index}] channel/kind 无效")
-        if not coverage_row or coverage_row.status != "ok":
-            raise SupplementValidationError(f"items[{index}] 缺少 ok coverage")
+        if not coverage_row or coverage_row.status not in {"ok", "partial"}:
+            raise SupplementValidationError(f"items[{index}] 缺少 ok/partial coverage")
         evidence = str(entry.get("evidence", "")).casefold()
         if evidence not in {"detail_read", "search_summary"}:
             raise SupplementValidationError(f"items[{index}] evidence 无效")

@@ -25,10 +25,15 @@ XHS_QUERIES = (
     "AI Agent 产品经理 社招 北京 评测",
     "Agent 评测 产品负责人 招聘",
 )
-WECHAT_QUERIES = (
-    "AI Agent 产品经理 招聘 高阶 社招",
-    "AI Agent 产品评测 人才 趋势",
+WECHAT_QUERY_FAMILIES = (
+    ("高阶社招", "AI Agent 高级产品经理 产品负责人 社招 北京 天津"),
+    ("评测可靠性", "Agent 评测 Benchmark 可靠性 产品经理 职业"),
+    ("人才流动", "大模型 Agent 高阶人才 流动 任命 招聘"),
+    ("薪酬市场", "2026 AI 大模型 Agent 人才 薪酬 招聘 报告"),
+    ("大厂招聘", "阿里 字节 腾讯 美团 百度 Agent 产品 社招"),
+    ("创业公司", "智谱 MiniMax 阶跃星辰 月之暗面 Agent 产品 招聘"),
 )
+WECHAT_QUERIES = tuple(query for _, query in WECHAT_QUERY_FAMILIES)
 AI_TERMS = (
     "agent", "agentic", "智能体", "ai", "llm", "大模型", "多模态",
     "评测", "eval", "benchmark", "可靠性",
@@ -36,6 +41,11 @@ AI_TERMS = (
 CAREER_TERMS = (
     "产品", "招聘", "社招", "岗位", "职位", "职业", "人才", "薪资",
     "面试", "市场", "行业", "趋势", "hiring", "career", "product",
+)
+TARGET_PRODUCT_TERMS = (
+    "ai产品", "ai 产品", "agent产品", "agent 产品", "智能体产品",
+    "大模型产品", "评测产品", "产品经理", "产品负责人", "产品专家",
+    "product manager", "product lead", "product owner",
 )
 EARLY_CAREER_ONLY = ("校招", "应届", "实习生", "暑期实习", "秋招", "春招")
 SENIOR_OR_SOCIAL = ("社招", "高级", "资深", "专家", "负责人", "senior", "staff", "lead")
@@ -208,6 +218,17 @@ def _is_relevant(title: str, summary: str) -> bool:
     )
 
 
+def _is_relevant_wechat(title: str, summary: str) -> bool:
+    """Prefer titled, target-role evidence over generic job newsletters."""
+    title_folded = title.casefold()
+    text = f"{title}\n{summary}".casefold()
+    return (
+        _is_relevant(title, summary)
+        and any(term.casefold() in title_folded for term in AI_TERMS)
+        and any(term.casefold() in text for term in TARGET_PRODUCT_TERMS)
+    )
+
+
 def _has_substantive_detail(title: str, summary: str) -> bool:
     """Reject title-plus-hashtag shells that do not contain readable evidence."""
     body = HASHTAG_RE.sub(" ", summary)
@@ -285,7 +306,16 @@ def _stable_wechat_url(row: dict[str, Any]) -> str:
         return ""
     parsed = urllib.parse.urlsplit(value)
     if parsed.scheme in {"http", "https"} and parsed.hostname == "mp.weixin.qq.com" and parsed.path.startswith("/s"):
-        return value
+        stable_keys = {"__biz", "mid", "idx", "sn"}
+        query = [
+            (key, item)
+            for key, item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            if key in stable_keys
+        ]
+        query.sort(key=lambda item: (item[0], item[1]))
+        return urllib.parse.urlunsplit(
+            ("https", "mp.weixin.qq.com", parsed.path, urllib.parse.urlencode(query), "")
+        )
     return ""
 
 
@@ -407,7 +437,7 @@ def _collect_xhs(
             }
         )
     items.sort(key=lambda item: _content_priority(item, now), reverse=True)
-    status = "ok" if candidates else "no_results"
+    status = "partial" if errors else "ok" if candidates else "no_results"
     summary = (
         (
             "已完成本机登录态检索与候选正文实读；部分查询失败，已保留其余结果；"
@@ -428,10 +458,10 @@ def _collect_wechat(
     now: datetime,
     runner: Callable[..., Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    rows: list[dict[str, Any]] = []
+    rows: list[tuple[str, dict[str, Any]]] = []
     errors: list[ChannelError] = []
     successful_queries = 0
-    for query in WECHAT_QUERIES:
+    for family, query in WECHAT_QUERY_FAMILIES:
         try:
             payload = _invoke_json(
                 ["opencli", "weixin", "search", query, "--limit", "10", "-f", "json"],
@@ -441,19 +471,22 @@ def _collect_wechat(
             errors.append(exc)
             continue
         successful_queries += 1
-        rows.extend(_records(payload))
+        rows.extend((family, row) for row in _records(payload))
     if not successful_queries and errors:
         raise errors[0]
     items: list[dict[str, Any]] = []
-    relevant_count = 0
     seen: set[str] = set()
-    for row in rows:
+    for family, row in rows:
         title = _clean_text(_value(row, "title", "name"), 160)
         summary = _clean_text(_value(row, "summary", "desc", "description", "content"))
         published = _parse_date(_value(row, "publish_time", "published_at", "time", "date"), now)
-        if not title or len(summary) < 30 or not _is_relevant(title, summary) or not _is_recent(published, now):
+        if (
+            not title
+            or len(summary) < 30
+            or not _is_relevant_wechat(title, summary)
+            or not _is_recent(published, now)
+        ):
             continue
-        relevant_count += 1
         identity = f"{title.casefold()}\n{summary.casefold()}"
         if identity in seen:
             continue
@@ -463,7 +496,7 @@ def _collect_wechat(
                 "channel": "wechat",
                 "kind": "content",
                 "evidence": "search_summary",
-                "source": "微信公众号（Agent Reach 检索摘要）",
+                "source": f"微信公众号（Agent Reach 检索摘要）｜{family}",
                 "title": title,
                 "summary": summary,
                 "published_at": published,
@@ -471,8 +504,20 @@ def _collect_wechat(
                 "url": _stable_wechat_url(row),
             }
         )
+    relevant_count = len(items)
     items.sort(key=lambda item: _content_priority(item, now), reverse=True)
-    status = "ok" if relevant_count else "no_results"
+    diverse: list[dict[str, Any]] = []
+    seen_families: set[str] = set()
+    for item in items:
+        family = str(item["source"]).rsplit("｜", 1)[-1]
+        if family in seen_families:
+            continue
+        diverse.append(item)
+        seen_families.add(family)
+        if len(diverse) >= 2:
+            break
+    items = diverse
+    status = "partial" if errors else "ok" if relevant_count else "no_results"
     summary = (
         (
             "已检索公众号公开索引；部分查询失败，已保留其余结果；仅保留标题、日期和摘要。"
@@ -480,7 +525,11 @@ def _collect_wechat(
             else "已检索公众号公开索引；仅保留标题、日期和摘要，搜狗临时跳转链接未进入补充包。"
         )
         if items
-        else "已检索公众号公开索引，本轮没有通过时效性和相关性检查的内容。"
+        else (
+            "公众号部分查询失败，其余查询没有通过时效性和相关性检查的内容。"
+            if errors
+            else "已检索公众号公开索引，本轮没有通过时效性和相关性检查的内容。"
+        )
     )
     return _coverage(
         "wechat", status, summary, queries=len(WECHAT_QUERIES), raw_count=len(rows),

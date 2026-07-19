@@ -114,7 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         bundle = load_supplement(supplement_path)
         social_ok = {
             row.channel for row in bundle.coverage
-            if row.channel in {"xiaohongshu", "wechat"} and row.status == "ok"
+            if row.channel in {"xiaohongshu", "wechat"}
+            and row.status in {"ok", "partial"}
         }
         if not social_ok or not bundle.signals:
             print("本机社交源没有生成可用证据；未触发工作流。", file=sys.stderr)

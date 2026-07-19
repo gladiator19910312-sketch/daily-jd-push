@@ -108,6 +108,52 @@ class PartialXhsRunner(FakeRunner):
         return super().__call__(args, **kwargs)
 
 
+class MultiWechatRunner(FakeRunner):
+    def __call__(self, args, **kwargs):
+        if args[1:3] == ["weixin", "search"]:
+            self.calls.append((args, kwargs))
+            self.assert_safe_invocation(args, kwargs)
+            index = collector.WECHAT_QUERIES.index(args[3])
+            payload = [
+                {
+                    "title": f"AI Agent 高阶产品人才观察 {index}",
+                    "summary": (
+                        f"第 {index} 组公开摘要分析 Agent 产品社招、评测可靠性、"
+                        "人才流动和业务闭环要求。"
+                    ),
+                    "publish_time": "07-13",
+                }
+            ]
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps(payload, ensure_ascii=False), ""
+            )
+        return super().__call__(args, **kwargs)
+
+
+class DuplicateWechatRunner(FakeRunner):
+    def __init__(self, *, fail_last=False):
+        super().__init__()
+        self.fail_last = fail_last
+
+    def __call__(self, args, **kwargs):
+        if args[1:3] == ["weixin", "search"]:
+            self.calls.append((args, kwargs))
+            self.assert_safe_invocation(args, kwargs)
+            if self.fail_last and args[3] == collector.WECHAT_QUERIES[-1]:
+                return subprocess.CompletedProcess(args, 1, "", "temporary failure")
+            payload = [
+                {
+                    "title": "高阶 AI Agent 产品经理社招观察",
+                    "summary": "文章梳理企业对 Agent 评测闭环、可靠性和业务结果的高阶产品人才要求。",
+                    "publish_time": "07-13",
+                }
+            ]
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps(payload, ensure_ascii=False), ""
+            )
+        return super().__call__(args, **kwargs)
+
+
 class AgentReachCollectorTests(unittest.TestCase):
     def test_collects_detail_text_and_never_serializes_tokens_or_pii(self):
         runner = FakeRunner()
@@ -126,6 +172,16 @@ class AgentReachCollectorTests(unittest.TestCase):
         wechat = next(item for item in payload["items"] if item["channel"] == "wechat")
         self.assertEqual(wechat["url"], "")
         self.assertEqual(wechat["published_at"], "2026-07-12T16:00:00+00:00")
+        wechat_coverage = next(
+            row for row in payload["coverage"] if row["channel"] == "wechat"
+        )
+        self.assertEqual(wechat_coverage["queries"], 6)
+        searched = {
+            call[3]
+            for call, _ in runner.calls
+            if call[1:3] == ["weixin", "search"]
+        }
+        self.assertEqual(searched, set(collector.WECHAT_QUERIES))
         for forbidden in (
             "xsec_token", "xhs-secret-token", "sogou_token", "private-user-id",
             "note-user-id", "13800138000", "recruiter@example.com", "cookie", "user_id",
@@ -190,6 +246,21 @@ class AgentReachCollectorTests(unittest.TestCase):
         self.assertFalse(collector._is_recent("", NOW))
         self.assertFalse(collector._is_recent("not-a-date", NOW))
 
+    def test_wechat_original_link_keeps_only_stable_public_parameters(self):
+        url = collector._stable_wechat_url(
+            {
+                "url": (
+                    "http://mp.weixin.qq.com/s?mid=2&__biz=a&idx=1&sn=x"
+                    "&scene=27&from=timeline#wechat_redirect"
+                )
+            }
+        )
+
+        self.assertEqual(
+            url,
+            "https://mp.weixin.qq.com/s?__biz=a&idx=1&mid=2&sn=x",
+        )
+
     def test_empty_detail_response_does_not_increment_detail_reads(self):
         payload = collector.collect_agent_reach(
             now=NOW, runner=EmptyXhsDetailRunner(), sleeper=lambda _: None
@@ -209,10 +280,56 @@ class AgentReachCollectorTests(unittest.TestCase):
             row for row in payload["coverage"] if row["channel"] == "xiaohongshu"
         )
 
-        self.assertEqual(coverage["status"], "ok")
+        self.assertEqual(coverage["status"], "partial")
         self.assertEqual(coverage["queries"], 2)
         self.assertIn("部分查询失败", coverage["summary"])
         self.assertTrue(any(item["channel"] == "xiaohongshu" for item in payload["items"]))
+
+    def test_wechat_searches_six_families_and_caps_output_at_two(self):
+        payload = collector.collect_agent_reach(
+            now=NOW, runner=MultiWechatRunner(), sleeper=lambda _: None
+        )
+        coverage = next(row for row in payload["coverage"] if row["channel"] == "wechat")
+        items = [item for item in payload["items"] if item["channel"] == "wechat"]
+
+        self.assertEqual(coverage["queries"], 6)
+        self.assertEqual(coverage["raw_count"], 6)
+        self.assertEqual(coverage["relevant_count"], 6)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(len({item["source"] for item in items}), 2)
+
+    def test_wechat_relevant_count_is_unique_across_query_families(self):
+        payload = collector.collect_agent_reach(
+            now=NOW, runner=DuplicateWechatRunner(), sleeper=lambda _: None
+        )
+        coverage = next(row for row in payload["coverage"] if row["channel"] == "wechat")
+
+        self.assertEqual(coverage["raw_count"], 6)
+        self.assertEqual(coverage["relevant_count"], 1)
+
+    def test_wechat_partial_failure_is_not_reported_as_full_success(self):
+        payload = collector.collect_agent_reach(
+            now=NOW, runner=DuplicateWechatRunner(fail_last=True), sleeper=lambda _: None
+        )
+        coverage = next(row for row in payload["coverage"] if row["channel"] == "wechat")
+
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["relevant_count"], 1)
+        self.assertIn("部分查询失败", coverage["summary"])
+
+    def test_wechat_rejects_generic_newsletters_with_incidental_agent_text(self):
+        self.assertFalse(
+            collector._is_relevant_wechat(
+                "央企名企北京地区岗位推荐 7 月",
+                "列表同时包含 AI Agent 工程师实习生和高级投资经理。",
+            )
+        )
+        self.assertTrue(
+            collector._is_relevant_wechat(
+                "高阶 AI Agent 产品经理社招观察",
+                "文章梳理了 Agent 评测闭环、可靠性和业务结果的产品人才要求。",
+            )
+        )
 
 
 if __name__ == "__main__":

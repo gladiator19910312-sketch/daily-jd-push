@@ -18,9 +18,16 @@
   "max_primary_push_jobs": 6,
   "max_trend_push_jobs": 4,
   "max_signal_push_items": 3,
-  "max_platform_signal_items": 0,
+  "max_platform_signal_items": 3,
   "max_content_signal_items": 4,
   "enable_public_platform_discovery": false,
+  "platform_discovery_disabled_reason": "公开检索关闭 / 无可靠正文验活",
+  "enabled_platform_query_names": [
+    "猎聘公开索引·北京直招",
+    "猎聘公开索引·北京猎头",
+    "猎聘公开索引·天津直招",
+    "猎聘公开索引·天津猎头"
+  ],
   "trend_signal_max_age_days": 45,
   "current_fixed_cash_wan": null,
   "target_total_comp_wan": null,
@@ -151,6 +158,37 @@
       "keywords": ["Agent", "智能体", "评测", "大模型产品", "AI产品", "多模态", "模型质量", "产品负责人", "产品专家"],
       "page_size": 100,
       "max_pages_per_keyword": 2
+    },
+    {
+      "type": "microsoft",
+      "key": "microsoft:beijing-social",
+      "name": "Microsoft 北京官方社招",
+      "company": "Microsoft",
+      "scope": "china",
+      "url": "https://apply.careers.microsoft.com/api/pcsx/search",
+      "detail_url": "https://apply.careers.microsoft.com/api/pcsx/position_details",
+      "domain": "microsoft.com",
+      "location": "China, Beijing",
+      "keywords": ["AI Product Manager", "Agent Product", "Copilot Product Manager", "Technical Product Manager AI", "Evaluation Product"],
+      "page_size": 10,
+      "max_pages_per_keyword": 2,
+      "max_detail_fetches": 12,
+      "sort_by": "timestamp",
+      "language": "en",
+      "active_apply_statuses": ["log_in"]
+    },
+    {
+      "type": "amazon",
+      "key": "amazon:china-social",
+      "name": "Amazon 中国官方社招",
+      "company": "Amazon",
+      "scope": "china",
+      "url": "https://www.amazon.jobs/en/search.json",
+      "loc_query": "China",
+      "keywords": ["AI Product Manager", "Agentic AI Product", "Agent Product Manager", "AI Evaluation Product", "Technical Product Manager AI"],
+      "page_size": 20,
+      "max_pages_per_keyword": 2,
+      "sort": "relevant"
     },
     {
       "type": "ashby",
@@ -341,10 +379,10 @@
       "query": "site:zhipin.com/job_detail/ (Agent OR 智能体 OR 大模型 OR 评测) (产品经理 OR 产品专家 OR 产品负责人) 北京 -校招 -应届 -实习"
     },
     {
-      "name": "猎聘岗位线索",
+      "name": "猎聘公开索引·北京直招",
       "kind": "platform",
       "language": "zh-CN",
-      "query": "site:liepin.com/job/ AI产品经理 Agent 北京"
+      "query": "site:www.liepin.com/job/ (Agent OR 智能体 OR 大模型 OR 评测 OR Benchmark) (高级产品经理 OR 产品专家 OR 产品负责人) 北京 -校招 -应届 -实习"
     },
     {
       "name": "智联岗位线索",
@@ -389,13 +427,13 @@
       "query": "site:maimai.cn/article/detail (AI产品 OR Agent产品 OR 大模型产品 OR 智能体) (高级 OR 专家 OR 负责人 OR P7 OR P8) (北京 OR 天津) -校招 -应届 -实习"
     },
     {
-      "name": "高成长 AI 公司高阶岗位线索",
+      "name": "猎聘公开索引·北京猎头",
       "kind": "platform",
       "language": "zh-CN",
-      "query": "site:liepin.com/job (智谱 OR MiniMax OR 百川智能 OR 零一万物 OR 面壁智能 OR 生数科技 OR 阶跃星辰 OR 月之暗面) (Agent OR 智能体 OR 大模型 OR 评测) (产品专家 OR 产品负责人 OR 高级产品经理) -校招 -应届 -实习"
+      "query": "site:www.liepin.com/a/ (Agent OR 智能体 OR 大模型 OR 评测 OR Benchmark) (高级产品经理 OR 产品专家 OR 产品负责人) 北京 -校招 -应届 -实习"
     },
     {
-      "name": "高成长 AI 公司薪酬线索",
+      "name": "BOSS·高成长 AI 公司薪酬线索",
       "kind": "platform",
       "language": "zh-CN",
       "query": "site:zhipin.com/job_detail/ (智谱 OR MiniMax OR 百川智能 OR 零一万物 OR 面壁智能 OR 生数科技) (Agent OR 智能体 OR 大模型) (产品 OR 负责人 OR 专家) (50K OR 60K OR 70K) -校招 -应届 -实习"
@@ -431,16 +469,40 @@
       "query": "site:chinajob.mohrss.gov.cn/h5/c 人工智能 互联网 招聘 专场"
     },
     {
-      "name": "微信公众号职场报告",
+      "name": "微信公众号·高阶社招",
       "kind": "content",
       "language": "zh-CN",
-      "query": "site:mp.weixin.qq.com 大模型 人才 报告"
+      "query": "site:mp.weixin.qq.com (Agent OR 智能体 OR 大模型) (高级产品经理 OR 产品专家 OR 产品负责人) 社招"
     },
     {
-      "name": "微信公众号 AI 产品求职",
+      "name": "微信公众号·评测可靠性",
       "kind": "content",
       "language": "zh-CN",
-      "query": "site:mp.weixin.qq.com AI产品经理 招聘 薪酬"
+      "query": "site:mp.weixin.qq.com Agent (评测 OR Benchmark OR 可靠性 OR 失败归因) 产品"
+    },
+    {
+      "name": "微信公众号·人才流动",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:mp.weixin.qq.com (大模型 OR Agent) (高阶人才 OR 人才流动 OR 任命 OR 招聘)"
+    },
+    {
+      "name": "微信公众号·2026薪酬市场",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:mp.weixin.qq.com 2026 (AI OR 大模型 OR Agent) (人才 OR 薪酬 OR 招聘) 报告"
+    },
+    {
+      "name": "微信公众号·大厂招聘",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:mp.weixin.qq.com (阿里 OR 字节 OR 腾讯 OR 美团 OR 百度) Agent 产品 社招"
+    },
+    {
+      "name": "微信公众号·AI创业公司",
+      "kind": "content",
+      "language": "zh-CN",
+      "query": "site:mp.weixin.qq.com (智谱 OR MiniMax OR 阶跃星辰 OR 月之暗面) Agent 产品 招聘"
     },
     {
       "name": "36氪 AI 人才报告",
@@ -465,6 +527,18 @@
       "kind": "platform",
       "language": "zh-CN",
       "query": "site:zhaopin.com/jobdetail AI产品经理 天津"
+    },
+    {
+      "name": "猎聘公开索引·天津直招",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:www.liepin.com/job/ (Agent OR 智能体 OR 大模型 OR 评测) (高级产品经理 OR 产品专家 OR 产品负责人) 天津 -校招 -应届 -实习"
+    },
+    {
+      "name": "猎聘公开索引·天津猎头",
+      "kind": "platform",
+      "language": "zh-CN",
+      "query": "site:www.liepin.com/a/ (Agent OR 智能体 OR 大模型 OR 评测) (高级产品经理 OR 产品专家 OR 产品负责人) 天津 -校招 -应届 -实习"
     }
   ]
 }

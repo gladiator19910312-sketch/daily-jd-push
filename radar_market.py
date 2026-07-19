@@ -78,8 +78,7 @@ def job_freshness(job: Job, config: dict[str, Any], now: datetime | None = None)
     posted = parse_timestamp(job.published_at)
     trusted_basis = job.date_basis in {"published", "created"}
     if posted and posted > now + timedelta(hours=48):
-        posted = None
-        trusted_basis = False
+        return Freshness("发布日期异常地晚于当前时间，已隔离", False, False, 9)
     if posted and trusted_basis:
         age = max(0, (now - posted).days)
         date_label = posted.date().isoformat()
