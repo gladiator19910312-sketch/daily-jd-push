@@ -13,7 +13,7 @@ from typing import Any
 from radar_ats import strip_html
 from radar_discovery import bing_rss_url, http_get
 from radar_market import parse_timestamp
-from radar_matching import is_early_career_job
+from radar_matching import looks_like_candidate_job, parse_salary, salary_gate
 from radar_search import duckduckgo_lite_url, parse_duckduckgo_results
 from radar_types import Job, TrendSignal, is_public_http_url
 
@@ -68,12 +68,32 @@ def signal_is_recent(signal: TrendSignal, max_days: int, now: datetime | None = 
     return -2 <= age <= max_days
 
 
-def signal_is_relevant(signal: TrendSignal) -> bool:
+def platform_signal_url_is_detail(url: str) -> bool:
+    """Reject known platform aggregation pages while retaining actual job/detail URLs."""
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.hostname or "").casefold()
+    path = parsed.path.casefold()
+    if host in {"www.zhipin.com", "m.zhipin.com"}:
+        return "/job_detail/" in path
+    if host in {"www.liepin.com", "m.liepin.com"}:
+        return "/job/" in path
+    if host in {"www.zhaopin.com", "m.zhaopin.com"}:
+        return "/jobdetail/" in path
+    if host in {"www.linkedin.com", "cn.linkedin.com", "sg.linkedin.com"}:
+        return "/jobs/view/" in path
+    if host in {"cn.indeed.com", "www.indeed.com"}:
+        return path == "/viewjob"
+    return True
+
+
+def signal_is_relevant(signal: TrendSignal, config: dict[str, Any] | None = None) -> bool:
     text = f"{signal.title}\n{signal.summary}".casefold()
-    if signal.kind == "platform" and is_early_career_job(
-        Job(signal.title, signal.url, signal.summary, signal.source)
-    ):
-        return False
+    if signal.kind == "platform":
+        job = Job(signal.title, signal.url, signal.summary, signal.source)
+        if not platform_signal_url_is_detail(signal.url) or not looks_like_candidate_job(job):
+            return False
+        if config and salary_gate(parse_salary(job.text), config)[1]:
+            return False
     return any(term.casefold() in text for term in AI_TERMS) and any(
         term.casefold() in text for term in MARKET_TERMS
     )
@@ -128,7 +148,7 @@ def discover_trend_signals(config: dict[str, Any]) -> tuple[list[TrendSignal], l
             signal
             for signal in signals
             if signal_url_allowed(signal.url, hosts)
-            and signal_is_relevant(signal)
+            and signal_is_relevant(signal, config)
             and signal_is_recent(signal, max_age)
         ]
         if not accepted:
@@ -158,7 +178,7 @@ def discover_trend_signals(config: dict[str, Any]) -> tuple[list[TrendSignal], l
                     signal
                     for signal in fallback
                     if signal_url_allowed(signal.url, hosts)
-                    and signal_is_relevant(signal)
+                    and signal_is_relevant(signal, config)
                     and signal_is_recent(signal, max_age)
                 ]
             except (ET.ParseError, KeyError, OSError, urllib.error.URLError) as exc:
