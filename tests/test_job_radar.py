@@ -16,6 +16,7 @@ from job_radar import (
     load_seen,
     load_seen_state,
     looks_like_product_job,
+    merge_signals,
     parse_ashby,
     parse_alibaba,
     parse_bytedance,
@@ -28,6 +29,7 @@ from job_radar import (
     parse_duckduckgo_lite,
     parse_trend_rss,
     partition_market,
+    pushed_within,
     salary_gate,
     save_seen,
     select_for_push,
@@ -47,7 +49,8 @@ from radar_trends import (
     signal_is_recent,
     signal_is_relevant,
 )
-from radar_types import TrendSignal, normalize_url
+from radar_types import TrendSignal, is_stable_public_signal_url, normalize_url
+from radar_supplement import SupplementCoverage
 
 
 CONFIG = {
@@ -182,6 +185,42 @@ class JobRadarTests(unittest.TestCase):
         ]
         selected = select_signals(signals, 4, platform_limit=4)
         self.assertEqual(len(selected), 1)
+
+    def test_signal_selection_caps_one_social_family_to_preserve_breadth(self):
+        observed = "2026-07-19T04:00:00+00:00"
+        xhs = [
+            TrendSignal(
+                f"Agent 产品观察 {index}",
+                "",
+                "Agent 评测、可靠性与产品闭环趋势",
+                f"小红书（Agent Reach 实读）｜作者{index}",
+                "content",
+                observed,
+            )
+            for index in range(3)
+        ]
+        wechat = TrendSignal(
+            "Agent 高阶社招观察",
+            "",
+            "Agent 产品社招、评测与人才趋势",
+            "微信公众号（Agent Reach）",
+            "content",
+            observed,
+        )
+        public = TrendSignal(
+            "Agent 人才报告",
+            "https://example.com/report",
+            "Agent 产品人才与行业趋势",
+            "行业报告",
+            "content",
+            observed,
+        )
+
+        selected = select_signals(
+            [*xhs, wechat, public], 4, content_limit=4
+        )
+
+        self.assertEqual(selected, [xhs[0], xhs[1], wechat, public])
 
     def test_platform_signal_relevance_rejects_campus_and_intern_roles(self):
         observed = "2026-07-19T04:00:00+00:00"
@@ -551,6 +590,25 @@ class JobRadarTests(unittest.TestCase):
         self.assertEqual([signal.url for signal in signals], ["https://example.com/report"])
         self.assertEqual(failures, [])
         self.assertEqual(parse_timestamp(signals[0].indexed_at).date(), datetime.now(timezone.utc).date())
+
+    @patch("radar_trends.http_get")
+    def test_public_platform_discovery_can_be_disabled(self, mock_get):
+        signals, failures = discover_trend_signals(
+            {
+                "enable_public_platform_discovery": False,
+                "trend_signal_hosts": ["www.zhipin.com"],
+                "trend_queries": [
+                    {
+                        "name": "BOSS",
+                        "kind": "platform",
+                        "query": "site:zhipin.com/job_detail Agent 产品经理",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(signals, [])
+        self.assertEqual(failures, [])
+        mock_get.assert_not_called()
 
     def test_salary_below_target_is_excluded(self):
         job = Job(
@@ -1119,6 +1177,27 @@ class JobRadarTests(unittest.TestCase):
         self.assertIn("报告\\]", report)
         self.assertEqual(report.count("](https://"), 1)
 
+    def test_report_never_emits_temporary_or_signed_social_urls(self):
+        unsafe_urls = (
+            "https://www.xiaohongshu.com/explore/abc?xsec_token=LEAK",
+            "https://weixin.sogou.com/link?token=LEAK",
+            "https://mp.weixin.qq.com/s?__biz=a&mid=1&idx=1&sn=x&pass_ticket=LEAK",
+        )
+        for index, url in enumerate(unsafe_urls):
+            with self.subTest(url=url):
+                signal = TrendSignal(
+                    f"Agent 行业信号 {index}", url,
+                    "Agent 产品招聘、评测、可靠性与人才趋势的公开内容摘要。",
+                    "公开搜索", "content", "2026-07-19T04:00:00+00:00",
+                )
+                report = format_report([], 0, [], signals=[signal], config=CONFIG)
+                self.assertNotIn("LEAK", report)
+                self.assertIn(signal.title, report)
+                self.assertFalse(is_stable_public_signal_url(url))
+
+        stable = "https://mp.weixin.qq.com/s?__biz=a&mid=1&idx=1&sn=x"
+        self.assertTrue(is_stable_public_signal_url(stable))
+
     def test_report_separates_platform_leads_from_industry_content(self):
         observed = "2026-07-19T04:00:00+00:00"
         platform = TrendSignal(
@@ -1142,6 +1221,58 @@ class JobRadarTests(unittest.TestCase):
         self.assertIn("行业报告 / 公众号 / 小红书｜趋势参考", report)
         self.assertIn("不等同于企业官网在招", report)
 
+    def test_report_discloses_actual_agent_reach_coverage_and_plain_evidence(self):
+        signal = TrendSignal(
+            "AI Agent 评测产品社招观察",
+            "",
+            "正文讨论了 Agent 评测闭环、可靠性、失败归因和业务结果等高阶产品岗位要求。",
+            "小红书（Agent Reach 实读）｜评测观察",
+            "content",
+            "2026-07-19T04:00:00+00:00",
+            "2026-05-11T16:00:00+00:00",
+        )
+        coverage = (
+            SupplementCoverage("xiaohongshu", "ok", "已实读正文", 2, 20, 3, 2),
+            SupplementCoverage("wechat", "no_results", "已检索", 2, 8, 0, 0),
+            SupplementCoverage("maimai", "unsupported", "适配器无职位搜索"),
+            SupplementCoverage("boss", "auth_required", "未实读 JD"),
+        )
+
+        report = format_report(
+            [], 0, [], signals=[signal], source_coverage=coverage, config=CONFIG
+        )
+
+        self.assertIn("Agent Reach 实际覆盖", report)
+        self.assertIn("检索 2 次 / 原始 20 条 / 相关 3 条 / 正文实读 2 条", report)
+        self.assertIn("当前不支持", report)
+        self.assertIn("需登录 / 未验活", report)
+        self.assertIn("AI Agent 评测产品社招观察", report)
+        self.assertIn("原文日期 2026-05-12", report)
+        self.assertNotIn("[AI Agent 评测产品社招观察]", report)
+
+    def test_supplement_signal_overrides_same_title_public_summary(self):
+        observed = "2026-07-19T04:00:00+00:00"
+        public = TrendSignal(
+            "Agent 产品社招观察",
+            "https://example.com/search-result",
+            "搜索引擎缓存摘要",
+            "公开搜索",
+            "content",
+            observed,
+        )
+        supplement = TrendSignal(
+            "Agent 产品社招观察",
+            "",
+            "本机实读正文摘要，包含评测闭环、可靠性和失败归因。",
+            "小红书（Agent Reach 实读）",
+            "content",
+            observed,
+        )
+
+        merged = merge_signals([public], [supplement])
+
+        self.assertEqual(merged, [supplement])
+
     def test_url_normalization_is_host_aware_and_stable(self):
         xhs_one = "https://www.xiaohongshu.com/explore/abc?xsec_token=one&xsec_source=pc"
         xhs_two = "https://www.xiaohongshu.com/explore/abc?xsec_token=two&xsec_source=search"
@@ -1160,6 +1291,15 @@ class JobRadarTests(unittest.TestCase):
             save_seen(path, {"one", "two"})
             self.assertEqual(load_seen(path), {"one", "two"})
             self.assertIn("updated_at", json.loads(path.read_text()))
+
+    def test_recent_successful_push_suppresses_only_short_cloud_fallback_window(self):
+        state = {"run:last-successful-push": "2026-07-19T00:00:00+00:00"}
+        recent = datetime(2026, 7, 19, 1, 30, tzinfo=timezone.utc)
+        old = datetime(2026, 7, 19, 3, 0, tzinfo=timezone.utc)
+
+        self.assertTrue(pushed_within(state, 2, recent))
+        self.assertFalse(pushed_within(state, 2, old))
+        self.assertFalse(pushed_within(state, 0, recent))
 
     def test_seen_state_expires_items_not_observed_within_hard_cap(self):
         with tempfile.TemporaryDirectory() as directory:

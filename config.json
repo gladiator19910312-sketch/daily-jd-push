@@ -18,8 +18,9 @@
   "max_primary_push_jobs": 6,
   "max_trend_push_jobs": 4,
   "max_signal_push_items": 3,
-  "max_platform_signal_items": 4,
-  "max_content_signal_items": 2,
+  "max_platform_signal_items": 0,
+  "max_content_signal_items": 4,
+  "enable_public_platform_discovery": false,
   "trend_signal_max_age_days": 45,
   "current_fixed_cash_wan": null,
   "target_total_comp_wan": null,
@@ -440,18 +441,6 @@
       "kind": "content",
       "language": "zh-CN",
       "query": "site:mp.weixin.qq.com AI产品经理 招聘 薪酬"
-    },
-    {
-      "name": "小红书职场报告",
-      "kind": "content",
-      "language": "zh-CN",
-      "query": "site:xiaohongshu.com AI产品经理 招聘"
-    },
-    {
-      "name": "小红书大模型求职",
-      "kind": "content",
-      "language": "zh-CN",
-      "query": "site:xiaohongshu.com 大模型 求职 薪酬"
     },
     {
       "name": "36氪 AI 人才报告",

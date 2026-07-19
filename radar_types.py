@@ -22,6 +22,35 @@ def is_public_http_url(value: str) -> bool:
     return parsed.hostname.casefold() not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 
+def is_stable_public_signal_url(value: str) -> bool:
+    """Allow only non-session URLs that are safe to place in a report."""
+    if not is_public_http_url(value):
+        return False
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.username or parsed.password or parsed.fragment:
+        return False
+    host = (parsed.hostname or "").casefold()
+    if host in {"xiaohongshu.com", "www.xiaohongshu.com", "weixin.sogou.com"}:
+        return False
+    query_keys = {
+        key.casefold().replace("-", "_")
+        for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    }
+    sensitive = {
+        "access_token", "auth", "authorization", "cookie", "key", "openid",
+        "pass_ticket", "signature", "sogou_token", "token", "xsec_token",
+    }
+    if any(key in sensitive or key.startswith("xsec_") for key in query_keys):
+        return False
+    if host == "mp.weixin.qq.com":
+        allowed = {"__biz", "mid", "idx", "sn"}
+        return (
+            (parsed.path == "/s" or parsed.path.startswith("/s/"))
+            and query_keys <= allowed
+        )
+    return True
+
+
 def normalize_url(value: str) -> str:
     if not is_public_http_url(value):
         return ""
@@ -124,6 +153,7 @@ class TrendSignal:
     source: str
     kind: str
     indexed_at: str
+    published_at: str = ""
 
     @property
     def identity(self) -> str:

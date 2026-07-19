@@ -32,7 +32,7 @@ from radar_delivery import (
     validate_dingtalk_webhook,
 )
 from radar_discovery import discover_jobs, enrich_jobs, parse_rss
-from radar_market import partition_market
+from radar_market import parse_timestamp, partition_market
 from radar_matching import (
     assess_job,
     looks_like_candidate_job,
@@ -43,8 +43,17 @@ from radar_matching import (
     select_diverse_assessments,
     select_for_push,
 )
+from radar_supplement import (
+    SupplementCoverage,
+    SupplementValidationError,
+    default_agent_reach_coverage,
+    load_supplement,
+)
 from radar_trends import discover_trend_signals, parse_duckduckgo_lite, parse_trend_rss
 from radar_types import Job, TrendSignal
+
+
+RECENT_PUSH_STATE_KEY = "run:last-successful-push"
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -106,13 +115,31 @@ def select_signals(
     def diverse(values: list[TrendSignal], limit: int) -> list[TrendSignal]:
         chosen: list[TrendSignal] = []
         chosen_sources: set[str] = set()
+        social_family_counts: dict[str, int] = {}
         for signal in values:
             if signal.source in chosen_sources:
                 continue
+            family = ""
+            if signal.source.startswith("小红书"):
+                family = "xiaohongshu"
+            elif signal.source.startswith("微信公众号"):
+                family = "wechat"
+            if family and social_family_counts.get(family, 0) >= 2:
+                continue
             chosen.append(signal)
             chosen_sources.add(signal.source)
+            if family:
+                social_family_counts[family] = social_family_counts.get(family, 0) + 1
             if len(chosen) >= limit:
                 break
+        if len(chosen) < limit:
+            for signal in values:
+                if signal.source in chosen_sources:
+                    continue
+                chosen.append(signal)
+                chosen_sources.add(signal.source)
+                if len(chosen) >= limit:
+                    break
         return chosen
 
     if platform_limit is not None or content_limit is not None:
@@ -153,19 +180,104 @@ def signals_to_baseline(
     return [signal for signal in signals if signal.source in selected_sources]
 
 
+def merge_signals(
+    public_signals: list[TrendSignal],
+    supplement_signals: tuple[TrendSignal, ...] | list[TrendSignal],
+) -> list[TrendSignal]:
+    """Merge evidence with locally validated content taking precedence."""
+    local = list(supplement_signals)
+    local_identities = {signal.identity for signal in local}
+    local_titles = {" ".join(signal.title.casefold().split()) for signal in local}
+    merged = local + [
+        signal
+        for signal in public_signals
+        if signal.identity not in local_identities
+        and " ".join(signal.title.casefold().split()) not in local_titles
+    ]
+    return merged
+
+
+def failed_agent_reach_coverage(reason: str) -> tuple[SupplementCoverage, ...]:
+    compact = " ".join(reason.split())[:120]
+    return (
+        SupplementCoverage("xiaohongshu", "error", compact),
+        SupplementCoverage("wechat", "error", compact),
+        SupplementCoverage("maimai", "unsupported", "当前适配器不支持职位或职言搜索"),
+        SupplementCoverage("boss", "auth_required", "未验证本机 BOSS 登录态；未实读 JD 不推送"),
+    )
+
+
+def pushed_within(
+    seen_state: dict[str, str],
+    hours: float,
+    now: datetime | None = None,
+) -> bool:
+    if hours <= 0:
+        return False
+    timestamp = parse_timestamp(seen_state.get(RECENT_PUSH_STATE_KEY))
+    if not timestamp:
+        return False
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_seconds = (current - timestamp).total_seconds()
+    return -300 <= age_seconds <= hours * 3600
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("config.json"))
     parser.add_argument("--state", type=Path, default=Path(".cache/seen_jobs.json"))
     parser.add_argument("--dry-run", action="store_true", default=os.getenv("DRY_RUN", "").casefold() == "true")
     parser.add_argument("--force-all", action="store_true", default=os.getenv("FORCE_ALL", "").casefold() == "true")
+    supplement_default = os.getenv("AGENT_REACH_SUPPLEMENT_PATH", "").strip()
+    parser.add_argument(
+        "--supplement",
+        type=Path,
+        default=Path(supplement_default) if supplement_default else None,
+        help="sanitized local Agent Reach JSON supplement",
+    )
+    parser.add_argument(
+        "--require-supplement",
+        action="store_true",
+        default=os.getenv("REQUIRE_AGENT_REACH_SUPPLEMENT", "").casefold() == "true",
+        help="fail closed when the requested supplement is absent or invalid",
+    )
+    parser.add_argument(
+        "--skip-if-recent-push-hours",
+        type=float,
+        default=float(os.getenv("SKIP_IF_RECENT_PUSH_HOURS", "0") or 0),
+        help="cloud-schedule fallback: skip when another push just succeeded",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
+    seen_state = load_seen_state(args.state, int(config.get("max_job_age_days", 180)))
+    if not args.force_all and pushed_within(seen_state, args.skip_if_recent_push_hours):
+        print("近期已有一次成功推送；本轮云端定时任务作为兜底跳过。")
+        return 0
+    supplement_signals: tuple[TrendSignal, ...] = ()
+    supplement_coverage = default_agent_reach_coverage()
+    supplement_failure = ""
+    if args.supplement:
+        try:
+            supplement = load_supplement(args.supplement)
+        except SupplementValidationError as exc:
+            supplement_failure = f"Agent Reach 补充包无效：{exc}"
+            if args.require_supplement:
+                print(supplement_failure, file=sys.stderr)
+                return 2
+            supplement_coverage = failed_agent_reach_coverage(supplement_failure)
+        else:
+            supplement_signals = supplement.signals
+            supplement_coverage = supplement.coverage
+    elif args.require_supplement:
+        print("要求 Agent Reach 补充包，但没有提供 --supplement", file=sys.stderr)
+        return 2
+
     signals, signal_failures = discover_trend_signals(config)
+    signals = merge_signals(signals, supplement_signals)
     jobs, failures = discover_jobs(config)
     jobs = [job for job in jobs if looks_like_candidate_job(job)]
     assessments = [assess_job(job, config) for job in jobs]
@@ -178,7 +290,6 @@ def main(argv: list[str] | None = None) -> int:
     ranked = rank_assessments((assess_job(job, config) for job in enriched), config)
 
     primary_all, trend_all = partition_market(ranked, config)
-    seen_state = load_seen_state(args.state, int(config.get("max_job_age_days", 180)))
     seen = set(seen_state)
     if args.force_all:
         fresh_primary, fresh_trends, fresh_signals = primary_all, trend_all, signals
@@ -214,13 +325,20 @@ def main(argv: list[str] | None = None) -> int:
         platform_limit=platform_signal_limit or None,
         content_limit=content_signal_limit or None,
     )
-    source_warnings = signal_failures[:1] + failures[:2] + signal_failures[1:] + failures[2:]
+    source_warnings = (
+        ([supplement_failure] if supplement_failure else [])
+        + signal_failures[:1]
+        + failures[:2]
+        + signal_failures[1:]
+        + failures[2:]
+    )
     report = format_report(
         selected_primary,
         len(jobs),
         source_warnings,
         trend_items=selected_trends,
         signals=selected_signals,
+        source_coverage=supplement_coverage,
         config=config,
     )
     if args.dry_run:
@@ -245,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         *(f"signal-source:{signal.source}" for signal in selected_signals),
     }
     seen_state.update((identity, observed_at) for identity in observed_identities)
+    seen_state[RECENT_PUSH_STATE_KEY] = observed_at
     save_seen_state(args.state, seen_state)
     print(
         f"已推送 {len(selected_primary)} 个北京/天津岗位、"
