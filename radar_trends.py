@@ -1,0 +1,162 @@
+"""Public-search signals from job platforms, reports, and social content."""
+
+from __future__ import annotations
+
+import html
+import urllib.error
+import urllib.parse
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from typing import Any
+
+from radar_ats import strip_html
+from radar_discovery import bing_rss_url, http_get
+from radar_market import parse_timestamp
+from radar_search import duckduckgo_lite_url, parse_duckduckgo_results
+from radar_types import TrendSignal, is_public_http_url
+
+
+AI_TERMS = (
+    "agent", "agentic", "智能体", "大模型", "llm", "multimodal", "多模态",
+    "eval", "benchmark", "评测", "可靠性", "ai product", "ai产品",
+)
+MARKET_TERMS = (
+    "product manager", "product lead", "产品经理", "产品专家", "招聘", "岗位",
+    "hiring", "career", "职场", "薪酬", "人才", "报告", "趋势",
+)
+
+
+def parse_duckduckgo_lite(
+    payload: bytes,
+    source: str,
+    kind: str,
+    limit: int,
+    observed_at: datetime | None = None,
+) -> list[TrendSignal]:
+    observed = observed_at or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    observed_text = observed.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return [
+        TrendSignal(result.title, result.url, result.summary, source, kind, observed_text)
+        for result in parse_duckduckgo_results(payload, limit)
+    ]
+
+
+def parse_trend_rss(payload: bytes, source: str, kind: str, limit: int) -> list[TrendSignal]:
+    root = ET.fromstring(payload)
+    signals: list[TrendSignal] = []
+    for item in root.findall(".//item")[:limit]:
+        title = html.unescape((item.findtext("title") or "").strip())
+        url = (item.findtext("link") or "").strip()
+        summary = strip_html(item.findtext("description") or "")
+        indexed_at = (item.findtext("pubDate") or "").strip()
+        if title and is_public_http_url(url):
+            signals.append(TrendSignal(title, url, summary, source, kind, indexed_at))
+    return signals
+
+
+def signal_is_recent(signal: TrendSignal, max_days: int, now: datetime | None = None) -> bool:
+    indexed = parse_timestamp(signal.indexed_at)
+    if not indexed:
+        return False
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age = (now - indexed).days
+    return -2 <= age <= max_days
+
+
+def signal_is_relevant(signal: TrendSignal) -> bool:
+    text = f"{signal.title}\n{signal.summary}".casefold()
+    return any(term.casefold() in text for term in AI_TERMS) and any(
+        term.casefold() in text for term in MARKET_TERMS
+    )
+
+
+def signal_url_allowed(url: str, hosts: list[str]) -> bool:
+    if not is_public_http_url(url):
+        return False
+    host = (urllib.parse.urlsplit(url).hostname or "").casefold()
+    return host in {item.casefold() for item in hosts}
+
+
+def discover_trend_signals(config: dict[str, Any]) -> tuple[list[TrendSignal], list[str]]:
+    discovered: dict[str, TrendSignal] = {}
+    failures: list[str] = []
+    limit = int(config.get("max_results_per_query", 12))
+    max_age = int(config.get("trend_signal_max_age_days", 45))
+    hosts = list(config.get("trend_signal_hosts", []))
+    observed_text = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    configured_queries = list(config.get("trend_queries", []))
+    content_queries = [query for query in configured_queries if query.get("kind") != "platform"]
+    platform_queries = [query for query in configured_queries if query.get("kind") == "platform"]
+    ordered_queries: list[dict[str, Any]] = []
+    for index in range(max(len(content_queries), len(platform_queries))):
+        if index < len(content_queries):
+            ordered_queries.append(content_queries[index])
+        if index < len(platform_queries):
+            ordered_queries.append(platform_queries[index])
+    for query in ordered_queries:
+        signals: list[TrendSignal] = []
+        primary_error: Exception | None = None
+        try:
+            payload = http_get(
+                duckduckgo_lite_url(query["query"], query.get("language", "zh-CN")),
+                timeout_seconds=6,
+                attempts=1,
+            )
+            signals = parse_duckduckgo_lite(
+                payload,
+                query["name"],
+                query.get("kind", "content"),
+                limit,
+            )
+        except (KeyError, OSError, urllib.error.URLError) as exc:
+            primary_error = exc
+
+        accepted = [
+            signal
+            for signal in signals
+            if signal_url_allowed(signal.url, hosts)
+            and signal_is_relevant(signal)
+            and signal_is_recent(signal, max_age)
+        ]
+        if not accepted:
+            try:
+                payload = http_get(
+                    bing_rss_url(query["query"], query.get("language", "zh-CN")),
+                    timeout_seconds=6,
+                    attempts=1,
+                )
+                fallback = [
+                    TrendSignal(
+                        signal.title,
+                        signal.url,
+                        signal.summary,
+                        signal.source,
+                        signal.kind,
+                        observed_text,
+                    )
+                    for signal in parse_trend_rss(
+                        payload,
+                        query["name"],
+                        query.get("kind", "content"),
+                        limit,
+                    )
+                ]
+                accepted = [
+                    signal
+                    for signal in fallback
+                    if signal_url_allowed(signal.url, hosts)
+                    and signal_is_relevant(signal)
+                    and signal_is_recent(signal, max_age)
+                ]
+            except (ET.ParseError, KeyError, OSError, urllib.error.URLError) as exc:
+                error = primary_error or exc
+                failures.append(f"{query.get('name', 'trend')}: {type(error).__name__}")
+        if not accepted and not any(
+            failure.startswith(f"{query.get('name', 'trend')}:") for failure in failures
+        ):
+            failures.append(f"{query.get('name', 'trend')}: 未发现相关公开索引")
+        for signal in accepted:
+            discovered.setdefault(signal.identity, signal)
+    return list(discovered.values()), failures
