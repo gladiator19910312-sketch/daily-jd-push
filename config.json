@@ -114,6 +114,54 @@
       "job_url_template": "https://app.mokahr.com/social-recruitment/deeproute/143885#/job/{id}"
     },
     {
+      "type": "moka",
+      "key": "moka:modelbest",
+      "name": "面壁智能官方",
+      "scope": "china",
+      "url": "https://api.mokahr.com/api-platform/v1/jobs/modelbest?mode=social&siteId=94342&status=open&limit=100&offset=0",
+      "job_url_template": "https://app.mokahr.com/social-recruitment/modelbest/94342#/job/{id}"
+    },
+    {
+      "type": "moka",
+      "key": "moka:4paradigm",
+      "name": "第四范式官方",
+      "scope": "china",
+      "url": "https://api.mokahr.com/api-platform/v1/jobs/4paradigm?mode=social&status=open&limit=100&offset=0",
+      "job_url_template": "https://app.mokahr.com/social-recruitment/4paradigm#/job/{id}"
+    },
+    {
+      "type": "moka",
+      "key": "moka:kunlun",
+      "name": "昆仑万维官方",
+      "scope": "china",
+      "url": "https://api.mokahr.com/api-platform/v1/jobs/kunlun?mode=social&status=open&limit=100&offset=0",
+      "job_url_template": "https://app.mokahr.com/social-recruitment/kunlun#/job/{id}"
+    },
+    {
+      "type": "moka",
+      "key": "moka:siliconflow",
+      "name": "硅基流动官方",
+      "scope": "china",
+      "url": "https://api.mokahr.com/api-platform/v1/jobs/siliconflow?mode=social&status=open&limit=100&offset=0",
+      "job_url_template": "https://app.mokahr.com/social-recruitment/siliconflow#/job/{id}"
+    },
+    {
+      "type": "moka",
+      "key": "moka:langboat",
+      "name": "澜舟科技官方",
+      "scope": "china",
+      "url": "https://api.mokahr.com/api-platform/v1/jobs/langboat?mode=social&status=open&limit=100&offset=0",
+      "job_url_template": "https://app.mokahr.com/social-recruitment/langboat#/job/{id}"
+    },
+    {
+      "type": "moka",
+      "key": "moka:pjlab",
+      "name": "上海人工智能实验室官方",
+      "scope": "china",
+      "url": "https://api.mokahr.com/api-platform/v1/jobs/pjlab?mode=social&siteId=39254&status=open&limit=100&offset=0",
+      "job_url_template": "https://app.mokahr.com/social-recruitment/pjlab/39254#/job/{id}"
+    },
+    {
       "type": "bytedance",
       "key": "bytedance:official-social",
       "name": "字节跳动官方社招",
@@ -270,7 +318,24 @@
     "talent.alibaba.com",
     "hr.xiaomi.com",
     "zhaopin.meituan.com",
-    "careers.microsoft.com"
+    "careers.microsoft.com",
+    "app.mokahr.com",
+    "www.sensetime.com",
+    "hr.iflytek.com",
+    "career.huawei.com",
+    "job.10086.cn",
+    "www.zhejianglab.org",
+    "jobs.feishu.cn",
+    "jobs.jd.com",
+    "careers.antgroup.com",
+    "jobs.163.com",
+    "jobs.didiglobal.com",
+    "jobs.ke.com",
+    "jobs.kuaishou.cn",
+    "job.chinatelecom.com.cn",
+    "www.pcl.ac.cn",
+    "www.pony.ai",
+    "www.weride.cn"
   ],
   "employer_career_hosts": [
     "talent.baidu.com",
@@ -279,7 +344,24 @@
     "talent.alibaba.com",
     "hr.xiaomi.com",
     "zhaopin.meituan.com",
-    "careers.microsoft.com"
+    "careers.microsoft.com",
+    "app.mokahr.com",
+    "www.sensetime.com",
+    "hr.iflytek.com",
+    "career.huawei.com",
+    "job.10086.cn",
+    "www.zhejianglab.org",
+    "jobs.feishu.cn",
+    "jobs.jd.com",
+    "careers.antgroup.com",
+    "jobs.163.com",
+    "jobs.didiglobal.com",
+    "jobs.ke.com",
+    "jobs.kuaishou.cn",
+    "job.chinatelecom.com.cn",
+    "www.pcl.ac.cn",
+    "www.pony.ai",
+    "www.weride.cn"
   ],
   "queries": [
     {
@@ -317,6 +399,102 @@
       "scope": "china",
       "language": "en-US",
       "query": "site:careers.microsoft.com AI Product Manager Beijing"
+    },
+    {
+      "name": "商汤官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:sensetime.com (大模型 OR Agent OR 智能体 OR 评测) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "讯飞官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:hr.iflytek.com (大模型 OR Agent OR 智能体) (产品经理 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "华为官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:career.huawei.com (大模型 OR Agent OR 智能体 OR 评测) (产品 OR 专家) 北京"
+    },
+    {
+      "name": "中国移动官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:job.10086.cn (大模型 OR 人工智能 OR Agent OR 智能体) (产品 OR 专家 OR 负责人) 北京"
+    },
+    {
+      "name": "之江实验室 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:zhejianglab.org (大模型 OR Agent OR 智能体) (产品 OR 研究 OR 工程师)"
+    },
+    {
+      "name": "飞书系 AI 创业公司",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:jobs.feishu.cn (智谱 OR MiniMax OR 百川 OR 零一万物 OR 生数 OR Momenta) (Agent OR 智能体 OR 大模型 OR 评测) (产品 OR 负责人 OR 专家)"
+    },
+    {
+      "name": "小马智行官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "(小马智行 OR Pony.ai) 招聘 (Agent OR 大模型 OR 智能体 OR 自动驾驶) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "文远知行官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "(文远知行 OR WeRide) 招聘 (Agent OR 大模型 OR 智能体 OR 自动驾驶) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "京东官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:jobs.jd.com (大模型 OR Agent OR 智能体 OR 评测) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "蚂蚁集团官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:careers.antgroup.com (大模型 OR Agent OR 智能体 OR 评测) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "网易官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:jobs.163.com (大模型 OR Agent OR 智能体) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "滴滴官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:jobs.didiglobal.com (大模型 OR Agent OR 智能体) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "贝壳官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:jobs.ke.com (大模型 OR Agent OR 智能体) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "快手官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:jobs.kuaishou.cn (大模型 OR Agent OR 智能体 OR 评测) (产品 OR 负责人 OR 专家) 北京"
+    },
+    {
+      "name": "中国电信官方 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:job.chinatelecom.com.cn (大模型 OR 人工智能 OR Agent OR 智能体) (产品 OR 专家 OR 负责人) 北京"
+    },
+    {
+      "name": "鹏城实验室 AI 产品",
+      "scope": "china",
+      "language": "zh-CN",
+      "query": "site:pcl.ac.cn (大模型 OR Agent OR 智能体) (产品 OR 研究 OR 工程师)"
     },
     {
       "name": "官方招聘站点",
