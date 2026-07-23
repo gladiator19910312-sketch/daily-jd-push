@@ -314,5 +314,104 @@ class DeliveryFormattingTests(unittest.TestCase):
         self.assertEqual(payload["markdown"]["text"], "## 内容")
 
 
+def platform_assessment() -> Assessment:
+    return Assessment(
+        job=Job(
+            "Agent评测产品经理",
+            "https://www.zhipin.com/job_detail/abc123DEF.html",
+            "负责 Agent 评测体系设计与落地，覆盖工具调用与失败归因。",
+            "BOSS直聘（本机验活）",
+            location="北京·朝阳区",
+            official=False,
+            company="美团",
+            active=True,
+        ),
+        fit=80,
+        ready=60,
+        asset="Agent Benchmark 与上线闭环案例",
+        salary=Salary(label="40-65K·16薪"),
+        salary_gate="公开薪酬未触发红线",
+        responsibilities=("设计 Agent 评测体系",),
+        strengths=("Benchmark/评测主轴匹配",),
+        gaps=("Agent 原型/API 实验闭环证据需补齐",),
+        work_risk="工时/差旅未披露",
+    )
+
+
+class PlatformJobSectionTests(unittest.TestCase):
+    def test_platform_section_rendered_with_items(self):
+        report = format_action_report(
+            [], 0, [], platform_items=[platform_assessment()], config=CONFIG
+        )
+
+        self.assertIn("平台岗位｜BOSS / 猎聘（本机已验活 L2）", report)
+        self.assertIn("平台信息以企业官网与面试确认为准", report)
+        self.assertIn("https://www.zhipin.com/job_detail/abc123DEF.html", report)
+        self.assertIn("发布日期未披露", report)
+
+    def test_platform_section_omitted_without_items(self):
+        report = format_action_report([], 0, [], config=CONFIG)
+
+        self.assertNotIn("平台岗位｜BOSS / 猎聘", report)
+
+
+class DingtalkRetryTests(unittest.TestCase):
+    WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=test-token"
+
+    @staticmethod
+    def _ok_response():
+        response = Mock()
+        response.read.return_value = b'{"errcode": 0, "errmsg": "ok"}'
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        return response
+
+    @patch("radar_delivery.time.sleep")
+    @patch("radar_delivery.urllib.request.build_opener")
+    def test_send_recovers_from_transient_network_error(self, mock_build_opener, _sleep):
+        import urllib.error
+
+        opener = Mock()
+        opener.open.side_effect = [
+            urllib.error.URLError("timed out"),
+            self._ok_response(),
+        ]
+        mock_build_opener.return_value = opener
+
+        send_dingtalk("## 内容", self.WEBHOOK, "test-secret")
+
+        self.assertEqual(opener.open.call_count, 2)
+
+    @patch("radar_delivery.time.sleep")
+    @patch("radar_delivery.urllib.request.build_opener")
+    def test_send_raises_after_exhausting_retries(self, mock_build_opener, _sleep):
+        import urllib.error
+
+        opener = Mock()
+        opener.open.side_effect = urllib.error.URLError("timed out")
+        mock_build_opener.return_value = opener
+
+        with self.assertRaises(RuntimeError):
+            send_dingtalk("## 内容", self.WEBHOOK, "test-secret")
+
+        self.assertEqual(opener.open.call_count, 3)
+
+    @patch("radar_delivery.time.sleep")
+    @patch("radar_delivery.urllib.request.build_opener")
+    def test_send_does_not_retry_client_errors(self, mock_build_opener, _sleep):
+        import urllib.error
+
+        opener = Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            self.WEBHOOK, 400, "Bad Request", {}, None
+        )
+        mock_build_opener.return_value = opener
+
+        with self.assertRaises(RuntimeError):
+            send_dingtalk("## 内容", self.WEBHOOK, "test-secret")
+
+        self.assertEqual(opener.open.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

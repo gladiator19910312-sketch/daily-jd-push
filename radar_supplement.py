@@ -19,6 +19,7 @@ ALLOWED_STATUSES = {
 }
 CHANNEL_HOSTS = {
     "boss": {"www.zhipin.com", "m.zhipin.com"},
+    "liepin": {"www.liepin.com", "m.liepin.com"},
     "linkedin": {"www.linkedin.com", "cn.linkedin.com", "sg.linkedin.com"},
     "maimai": {"maimai.cn", "www.maimai.cn"},
     "wechat": {"mp.weixin.qq.com"},
@@ -27,12 +28,16 @@ CHANNEL_HOSTS = {
     "xiaohongshu": set(),
 }
 CHANNEL_LABELS = {
-    "boss": "BOSS直聘",
+    "boss": "BOSS直聘（Agent Reach 验活）",
+    "liepin": "猎聘（Agent Reach 验活）",
     "linkedin": "LinkedIn",
     "maimai": "脉脉（Agent Reach）",
     "wechat": "微信公众号（Agent Reach 检索摘要）",
     "xiaohongshu": "小红书（Agent Reach 实读）",
 }
+JOB_CHANNELS = {"boss", "liepin"}
+JOB_MIN_DESCRIPTION = 100
+JOB_MAX_DESCRIPTION = 2000
 SENSITIVE_KEY_PARTS = {
     "access_token", "authorization", "cookie", "openid", "pass_ticket",
     "raw", "raw_html", "raw_response", "request_headers", "response_headers",
@@ -46,7 +51,7 @@ TEMPLATE_PHRASES = (
     "boss直聘为您提供", "找工作就上boss直聘", "在线开聊约面试",
     "点击查看详情", "登录后查看更多", "登录后查看完整",
 )
-ALLOWED_TOP_LEVEL_KEYS = {"schema_version", "generated_at", "coverage", "items"}
+ALLOWED_TOP_LEVEL_KEYS = {"schema_version", "generated_at", "coverage", "items", "jobs"}
 ALLOWED_COVERAGE_KEYS = {
     "channel", "status", "summary", "queries", "raw_count", "relevant_count",
     "detail_reads",
@@ -54,6 +59,10 @@ ALLOWED_COVERAGE_KEYS = {
 ALLOWED_ITEM_KEYS = {
     "channel", "kind", "source", "title", "summary", "published_at",
     "observed_at", "evidence", "url",
+}
+ALLOWED_JOB_KEYS = {
+    "channel", "title", "company", "location", "salary_text",
+    "description", "url", "observed_at",
 }
 SOURCE_SUFFIX_RE = re.compile(r"^[^|｜\n]{1,30}$")
 SENSITIVE_VALUE_RE = re.compile(
@@ -80,11 +89,24 @@ class SupplementCoverage:
 
 
 @dataclass(frozen=True)
+class SupplementJob:
+    channel: str
+    title: str
+    company: str
+    location: str
+    salary_text: str
+    description: str
+    url: str
+    observed_at: str
+
+
+@dataclass(frozen=True)
 class SupplementBundle:
     schema_version: int
     generated_at: str
     coverage: tuple[SupplementCoverage, ...]
     signals: tuple[TrendSignal, ...]
+    jobs: tuple[SupplementJob, ...] = ()
 
 
 def _normalized_key(value: Any) -> str:
@@ -128,8 +150,6 @@ def _timestamp(value: Any, field: str) -> datetime:
 
 def _validate_url(channel: str, value: Any, kind: str) -> str:
     url = str(value or "").strip()
-    if channel == "boss":
-        raise SupplementValidationError("BOSS 补充证据尚未开放；需实现可验证的正文实读证明")
     if not url:
         if kind == "platform":
             raise SupplementValidationError("平台岗位证据必须有已验活的职位详情 URL")
@@ -148,6 +168,12 @@ def _validate_url(channel: str, value: Any, kind: str) -> str:
     if any(key in SENSITIVE_QUERY_KEYS or key.startswith("xsec_") for key in query_keys):
         raise SupplementValidationError("补充包 URL 含敏感访问参数")
     path = parsed.path
+    if channel == "boss" and not re.fullmatch(r"/job_detail/[0-9A-Za-z_~-]+\.html", path):
+        raise SupplementValidationError("BOSS 证据必须是职位详情直达页")
+    if channel == "liepin" and not re.fullmatch(r"/(?:job|a)/\d+\.shtml", path):
+        raise SupplementValidationError("猎聘证据必须是职位详情直达页")
+    if channel in {"boss", "liepin"} and parsed.query:
+        raise SupplementValidationError("平台职位 URL 不得含查询参数")
     if channel == "linkedin" and not re.fullmatch(r"/jobs/view/(?:[^/]*-)?\d+/?", path):
         raise SupplementValidationError("LinkedIn 证据必须是职位详情直达页")
     if channel == "wechat":
@@ -161,14 +187,14 @@ def _validate_url(channel: str, value: Any, kind: str) -> str:
     return normalize_url(url)
 
 
-def _validate_summary(value: Any) -> str:
+def _validate_summary(value: Any, max_chars: int = 600) -> str:
     summary = " ".join(str(value or "").split())
     folded = summary.casefold()
     if len(summary) < 30:
         raise SupplementValidationError("补充证据 summary 过短")
     if any(phrase in folded for phrase in TEMPLATE_PHRASES):
         raise SupplementValidationError("补充证据 summary 是登录或平台模板，不是正文")
-    return summary[:600]
+    return summary[:max_chars]
 
 
 def _validated_source(channel: str, value: Any) -> str:
@@ -186,8 +212,9 @@ def default_agent_reach_coverage() -> tuple[SupplementCoverage, ...]:
     return (
         SupplementCoverage("xiaohongshu", "skipped", "未收到本机 Agent Reach 脱敏补充包，本轮未执行"),
         SupplementCoverage("wechat", "skipped", "未收到本机 Agent Reach 脱敏补充包，本轮未执行"),
-        SupplementCoverage("maimai", "unsupported", "当前适配器不支持职位或职言搜索"),
+        SupplementCoverage("maimai", "skipped", "未收到本机 Agent Reach 脱敏补充包，本轮未执行"),
         SupplementCoverage("boss", "auth_required", "未验证本机 BOSS 登录态；未实读 JD 不推送"),
+        SupplementCoverage("liepin", "auth_required", "未验证本机猎聘验活链路；未实读 JD 不推送"),
     )
 
 
@@ -307,7 +334,67 @@ def parse_supplement(
             raise SupplementValidationError(f"{channel} coverage.relevant_count 少于输出条数")
         if row.detail_reads < detail_item_counts.get(channel, 0):
             raise SupplementValidationError(f"{channel} coverage.detail_reads 少于实读证据条数")
-    return SupplementBundle(1, generated.isoformat(timespec="seconds"), tuple(coverage), tuple(signals))
+
+    raw_jobs = payload.get("jobs", [])
+    if not isinstance(raw_jobs, list):
+        raise SupplementValidationError("jobs 必须是数组")
+    jobs: list[SupplementJob] = []
+    job_urls: set[str] = set()
+    job_counts: dict[str, int] = {}
+    for index, entry in enumerate(raw_jobs):
+        if not isinstance(entry, dict):
+            raise SupplementValidationError(f"jobs[{index}] 必须是对象")
+        _require_known_keys(entry, ALLOWED_JOB_KEYS, f"jobs[{index}]")
+        channel = str(entry.get("channel", "")).casefold()
+        if channel not in JOB_CHANNELS:
+            raise SupplementValidationError(f"jobs[{index}] channel 无效")
+        coverage_row = by_channel.get(channel)
+        if not coverage_row or coverage_row.status not in {"ok", "partial"}:
+            raise SupplementValidationError(f"jobs[{index}] 缺少 ok/partial coverage")
+        title = " ".join(str(entry.get("title", "")).split())
+        if len(title) < 4:
+            raise SupplementValidationError(f"jobs[{index}] 标题过短")
+        company = " ".join(str(entry.get("company", "")).split())[:80]
+        location = " ".join(str(entry.get("location", "")).split())[:80]
+        if not location:
+            raise SupplementValidationError(f"jobs[{index}] 缺少地点")
+        salary_text = " ".join(str(entry.get("salary_text", "")).split())[:40]
+        description = _validate_summary(entry.get("description"), JOB_MAX_DESCRIPTION)
+        if len(description) < JOB_MIN_DESCRIPTION:
+            raise SupplementValidationError(f"jobs[{index}] 正文过短，不构成实读证明")
+        url = _validate_url(channel, entry.get("url"), "platform")
+        if url in job_urls:
+            raise SupplementValidationError(f"jobs[{index}] 与已有岗位重复")
+        job_urls.add(url)
+        observed = _timestamp(entry.get("observed_at"), f"jobs[{index}].observed_at")
+        if observed > generated + timedelta(minutes=5) or observed > current + timedelta(minutes=5):
+            raise SupplementValidationError(f"jobs[{index}].observed_at 来自未来")
+        if observed < generated - timedelta(hours=24):
+            raise SupplementValidationError(f"jobs[{index}].observed_at 与补充包时间不一致")
+        jobs.append(
+            SupplementJob(
+                channel=channel,
+                title=title[:160],
+                company=company,
+                location=location,
+                salary_text=salary_text,
+                description=description,
+                url=url,
+                observed_at=observed.isoformat(timespec="seconds"),
+            )
+        )
+        job_counts[channel] = job_counts.get(channel, 0) + 1
+    for channel, count in job_counts.items():
+        row = by_channel[channel]
+        if row.relevant_count < count or row.detail_reads < count:
+            raise SupplementValidationError(f"{channel} coverage 计数与 jobs 条数不一致")
+    return SupplementBundle(
+        1,
+        generated.isoformat(timespec="seconds"),
+        tuple(coverage),
+        tuple(signals),
+        tuple(jobs),
+    )
 
 
 def load_supplement(

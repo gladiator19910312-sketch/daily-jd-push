@@ -13,12 +13,27 @@ import json
 import os
 import re
 import subprocess
+import sys
+import tempfile
 import time
 import urllib.parse
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from radar_discovery import http_get  # noqa: E402
+from radar_search import duckduckgo_lite_url  # noqa: E402
+from radar_trends import (  # noqa: E402
+    parse_duckduckgo_lite,
+    platform_signal_url_is_detail,
+    signal_is_relevant,
+)
+from radar_types import TrendSignal  # noqa: E402
 
 
 XHS_QUERIES = (
@@ -52,6 +67,21 @@ SENIOR_OR_SOCIAL = ("社招", "高级", "资深", "专家", "负责人", "senior
 MAX_AGE_DAYS = 183
 MAX_DETAIL_READS = 4
 DETAIL_DELAY_SECONDS = 2.5
+BOSS_QUERIES = ("Agent 产品经理", "AI 评测 产品经理", "大模型 产品负责人")
+BOSS_CITIES = ("北京", "天津")
+BOSS_MAX_DETAILS = 8
+BOSS_RETRY_ATTEMPTS = 3
+BOSS_RETRY_DELAY_SECONDS = 5.0
+BOSS_MIN_DESCRIPTION_CHARS = 100
+PRIMARY_CITY_TERMS = ("北京", "天津")
+LIEPIN_MAX_READS = 6
+LIEPIN_MIN_BODY_CHARS = 300
+MAIMAI_MAX_ITEMS = 4
+LIEPIN_SALARY_RE = re.compile(r"\d+\s*[-~]\s*\d+\s*[kK](?:·\d+薪)?")
+LIEPIN_LOCATION_RE = re.compile(r"【\s*([^】]{2,20})\s*】")
+LIEPIN_TITLE_RE = re.compile(r"^#\s+(.+)$", re.M)
+MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 
 EMAIL_RE = re.compile(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?86[\s-]?)?1[3-9]\d{9}(?!\d)")
@@ -537,13 +567,383 @@ def _collect_wechat(
     ), items
 
 
+def _invoke_json_with_retries(
+    args: list[str],
+    *,
+    runner: Callable[..., Any],
+    sleeper: Callable[[float], None],
+    attempts: int = BOSS_RETRY_ATTEMPTS,
+    delay: float = BOSS_RETRY_DELAY_SECONDS,
+) -> Any:
+    """Retry OpenCLI calls to ride out intermittent browser detach errors."""
+    last_error: ChannelError | None = None
+    for index in range(attempts):
+        if index:
+            sleeper(delay)
+        try:
+            return _invoke_json(args, runner)
+        except ChannelError as exc:
+            last_error = exc
+            if exc.status == "auth_required":
+                raise
+    assert last_error is not None
+    raise last_error
+
+
+def _boss_direct_url(value: str) -> str:
+    """Normalize a BOSS job URL to its query-free direct detail page."""
+    parsed = urllib.parse.urlsplit(str(value or "").strip())
+    if not re.fullmatch(r"/job_detail/[0-9A-Za-z_~-]+\.html", parsed.path):
+        return ""
+    return urllib.parse.urlunsplit(("https", "www.zhipin.com", parsed.path, "", ""))
+
+
+def _collect_boss(
+    now: datetime,
+    runner: Callable[..., Any],
+    sleeper: Callable[[float], None],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Search BOSS with the local logged-in session and verify JD full text.
+
+    Recruiter names and contact details are never serialized; only the JD
+    fields needed for assessment enter the sanitized supplement.
+    """
+    rows: list[dict[str, Any]] = []
+    errors: list[ChannelError] = []
+    successful_queries = 0
+    for city in BOSS_CITIES:
+        for query in BOSS_QUERIES:
+            try:
+                payload = _invoke_json_with_retries(
+                    ["opencli", "boss", "search", query, "--city", city,
+                     "--limit", "10", "-f", "json"],
+                    runner=runner,
+                    sleeper=sleeper,
+                )
+            except ChannelError as exc:
+                errors.append(exc)
+                continue
+            successful_queries += 1
+            rows.extend((city, row) for row in _records(payload))
+    if not successful_queries and errors:
+        raise errors[0]
+    candidates: list[tuple[str, str, str, str, str, str, str]] = []
+    seen_candidates: set[str] = set()
+    for search_city, row in rows:
+        title = _clean_text(_value(row, "name", "title"), 160)
+        company = _clean_text(_value(row, "company"), 60)
+        salary = _clean_text(_value(row, "salary"), 40)
+        location = _clean_text(_value(row, "area", "city"), 60)
+        skills = _clean_text(_value(row, "skills"), 200)
+        security_id = str(_value(row, "security_id", "securityId") or "").strip()
+        url = _boss_direct_url(str(_value(row, "url") or ""))
+        if not title or not security_id or not url:
+            continue
+        location = location or search_city
+        if not any(term in location for term in PRIMARY_CITY_TERMS):
+            continue
+        if not _is_relevant(title, skills or f"{company} 产品"):
+            continue
+        if security_id in seen_candidates:
+            continue
+        seen_candidates.add(security_id)
+        candidates.append((title, company, salary, location, security_id, url, search_city))
+    jobs: list[dict[str, Any]] = []
+    detail_reads = 0
+    detail_attempts = 0
+    for title, company, salary, location, security_id, url, search_city in candidates[:BOSS_MAX_DETAILS]:
+        if detail_attempts:
+            sleeper(DETAIL_DELAY_SECONDS)
+        detail_attempts += 1
+        try:
+            detail = _invoke_json_with_retries(
+                ["opencli", "boss", "detail", security_id, "-f", "json"],
+                runner=runner,
+                sleeper=sleeper,
+            )
+        except ChannelError:
+            continue
+        detail_rows = _records(detail)
+        detail_row = detail_rows[0] if detail_rows else {}
+        description = _clean_text(
+            _value(detail_row, "description", "desc", "content"), 2000
+        )
+        if len(description) < BOSS_MIN_DESCRIPTION_CHARS or not _is_relevant(title, description):
+            continue
+        detail_city = _clean_text(_value(detail_row, "city"), 20)
+        detail_district = _clean_text(_value(detail_row, "district"), 30)
+        if detail_city:
+            location = f"{detail_city}·{detail_district}" if detail_district else detail_city
+        if not any(term in location for term in PRIMARY_CITY_TERMS):
+            continue
+        detail_reads += 1
+        jobs.append(
+            {
+                "channel": "boss",
+                "title": title,
+                "company": company,
+                "location": location,
+                "salary_text": salary,
+                "description": description,
+                "url": url,
+                "observed_at": now.isoformat(timespec="seconds"),
+            }
+        )
+    status = "partial" if errors else "ok" if candidates else "no_results"
+    summary = (
+        "已完成本机 BOSS 登录态检索与职位正文实读；招聘者个人信息未进入补充包。"
+        if jobs
+        else "已完成本机 BOSS 检索，本轮没有通过相关性、地点与正文检查的岗位。"
+    )
+    if errors:
+        summary = f"部分查询失败，已保留其余结果；{summary}"
+    return _coverage(
+        "boss", status, summary,
+        queries=len(BOSS_CITIES) * len(BOSS_QUERIES),
+        raw_count=len(rows), relevant_count=len(candidates), detail_reads=detail_reads,
+    ), jobs
+
+
+def _radar_config() -> dict[str, Any]:
+    try:
+        with (REPOSITORY_ROOT / "config.json").open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _default_index_searcher(query: str, language: str) -> list[TrendSignal]:
+    payload = http_get(duckduckgo_lite_url(query, language), timeout_seconds=6, attempts=1)
+    return parse_duckduckgo_lite(payload, query, "platform", 12)
+
+
+def _trend_queries(
+    config: dict[str, Any], needle: str, *, require_enabled: bool
+) -> list[dict[str, Any]]:
+    enabled = {str(name) for name in config.get("enabled_platform_query_names", [])}
+    queries = []
+    for query in config.get("trend_queries", []):
+        name = str(query.get("name", ""))
+        if needle not in name:
+            continue
+        if require_enabled and name not in enabled:
+            continue
+        queries.append(query)
+    return queries
+
+
+def _strip_markdown(text: str) -> str:
+    text = MD_IMAGE_RE.sub(" ", text)
+    text = MD_LINK_RE.sub(r"\1", text)
+    text = re.sub(r"^#+\s*", "", text, flags=re.M)
+    return SPACE_RE.sub(" ", text).strip()
+
+
+def _read_web_markdown(url: str, runner: Callable[..., Any]) -> str:
+    """Read a public page through OpenCLI web read inside a throwaway cwd."""
+    with tempfile.TemporaryDirectory(prefix="agent-reach-web-") as tmp:
+        payload = _invoke_json(
+            ["opencli", "web", "read", "--url", url, "-f", "json"],
+            lambda a, **kw: runner(a, cwd=tmp, **{k: v for k, v in kw.items() if k != "cwd"}),
+        )
+        records = _records(payload)
+        if not records or str(records[0].get("status")) != "success":
+            raise ChannelError("web read did not succeed")
+        saved = str(records[0].get("saved") or "").strip()
+        if not saved:
+            raise ChannelError("web read returned no saved path")
+        path = (Path(tmp) / saved).resolve()
+        if Path(tmp).resolve() not in path.parents:
+            raise ChannelError("web read saved path escapes temp dir")
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            raise ChannelError("web read markdown unreadable") from exc
+
+
+LIEPIN_JD_START_RE = re.compile(r"职位描述|岗位职责|职位职责")
+LIEPIN_JD_END_RE = re.compile(r"相似职位|公司介绍|职位发布者|猎头顾问|职位推荐|更多相似")
+
+
+def _liepin_jd_section(markdown: str) -> str:
+    """Keep only the JD body; recruiter name cards never enter the supplement."""
+    start = LIEPIN_JD_START_RE.search(markdown)
+    if not start:
+        return ""
+    tail = markdown[start.start():]
+    end = LIEPIN_JD_END_RE.search(tail)
+    return tail[: end.start()] if end else tail
+
+
+def _liepin_job_from_page(url: str, markdown: str, now: datetime) -> dict[str, Any] | None:
+    section = _liepin_jd_section(markdown)
+    if not section:
+        return None
+    body = _strip_markdown(section)
+    if len(body) < LIEPIN_MIN_BODY_CHARS:
+        return None
+    salary_match = LIEPIN_SALARY_RE.search(markdown)
+    if not salary_match:
+        return None
+    title_match = LIEPIN_TITLE_RE.search(markdown)
+    title = _clean_text(title_match.group(1) if title_match else "", 160)
+    if not title:
+        return None
+    location_match = LIEPIN_LOCATION_RE.search(markdown)
+    location = _clean_text(location_match.group(1), 40) if location_match else ""
+    if not location or not any(term in location for term in PRIMARY_CITY_TERMS):
+        return None
+    description = _clean_text(body, 2000)
+    if len(description) < LIEPIN_MIN_BODY_CHARS or not _is_relevant(title, description):
+        return None
+    return {
+        "channel": "liepin",
+        "title": title,
+        "company": "",
+        "location": location,
+        "salary_text": salary_match.group(0).replace(" ", ""),
+        "description": description,
+        "url": url,
+        "observed_at": now.isoformat(timespec="seconds"),
+    }
+
+
+def _collect_liepin(
+    now: datetime,
+    runner: Callable[..., Any],
+    config: dict[str, Any],
+    searcher: Callable[[str, str], list[TrendSignal]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Verify Liepin index leads by reading the actual job pages locally.
+
+    Leads that fail verification are dropped rather than emitted as L3,
+    because the cloud trend pipeline already reports unverified Liepin leads.
+    """
+    queries = _trend_queries(config, "猎聘", require_enabled=True)
+    if not queries:
+        return _coverage("liepin", "skipped", "未找到猎聘查询配置，本轮未执行。"), []
+    leads: dict[str, TrendSignal] = {}
+    errors = 0
+    raw_count = 0
+    for query in queries:
+        try:
+            signals = searcher(str(query["query"]), str(query.get("language", "zh-CN")))
+        except Exception:
+            errors += 1
+            continue
+        raw_count += len(signals)
+        for signal in signals:
+            host = (urllib.parse.urlsplit(signal.url).hostname or "").casefold()
+            if host not in {"www.liepin.com", "m.liepin.com"}:
+                continue
+            if not platform_signal_url_is_detail(signal.url) or not signal_is_relevant(signal):
+                continue
+            parsed = urllib.parse.urlsplit(signal.url)
+            clean_url = urllib.parse.urlunsplit(("https", "www.liepin.com", parsed.path, "", ""))
+            leads.setdefault(clean_url, signal)
+    if errors and errors == len(queries):
+        raise ChannelError("all liepin index queries failed")
+    jobs: list[dict[str, Any]] = []
+    for url in list(leads)[:LIEPIN_MAX_READS]:
+        try:
+            markdown = _read_web_markdown(url, runner)
+        except ChannelError:
+            continue
+        job = _liepin_job_from_page(url, markdown, now)
+        if job:
+            jobs.append(job)
+    status = "partial" if errors else "ok" if leads else "no_results"
+    summary = (
+        "已完成猎聘公开索引检索与本机正文验活；未验活线索不进入补充包。"
+        if jobs
+        else "已完成猎聘公开索引检索，本轮没有通过正文验活的岗位。"
+    )
+    if errors:
+        summary = f"部分查询失败，已保留其余结果；{summary}"
+    return _coverage(
+        "liepin", status, summary,
+        queries=len(queries), raw_count=raw_count,
+        relevant_count=len(leads), detail_reads=len(jobs),
+    ), jobs
+
+
+def _collect_maimai(
+    now: datetime,
+    config: dict[str, Any],
+    searcher: Callable[[str, str], list[TrendSignal]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Collect Maimai public-index signals; URLs stay off the supplement."""
+    queries = _trend_queries(config, "脉脉", require_enabled=False)
+    if not queries:
+        return _coverage("maimai", "skipped", "未找到脉脉查询配置，本轮未执行。"), []
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    errors = 0
+    raw_count = 0
+    executed_queries = 0
+    for query in queries:
+        try:
+            signals = searcher(str(query["query"]), str(query.get("language", "zh-CN")))
+        except Exception:
+            errors += 1
+            continue
+        executed_queries += 1
+        raw_count += len(signals)
+        for signal in signals:
+            host = (urllib.parse.urlsplit(signal.url).hostname or "").casefold()
+            if host not in {"maimai.cn", "www.maimai.cn"}:
+                continue
+            title = _clean_text(signal.title, 160)
+            summary = _clean_text(signal.summary)
+            if not title or len(summary) < 30 or not _is_relevant(title, summary):
+                continue
+            identity = f"{title.casefold()}\n{summary.casefold()}"
+            if identity in seen:
+                continue
+            seen.add(identity)
+            items.append(
+                {
+                    "channel": "maimai",
+                    "kind": "content",
+                    "evidence": "search_summary",
+                    "source": "脉脉（Agent Reach 公开索引）",
+                    "title": title,
+                    "summary": summary,
+                    "published_at": "",
+                    "observed_at": now.isoformat(timespec="seconds"),
+                    "url": "",
+                }
+            )
+            if len(items) >= MAIMAI_MAX_ITEMS:
+                break
+        if len(items) >= MAIMAI_MAX_ITEMS:
+            break
+    if errors and errors == len(queries):
+        raise ChannelError("all maimai index queries failed")
+    status = "partial" if errors else "ok" if items else "no_results"
+    summary = (
+        "已检索脉脉公开索引；仅保留标题与摘要，不带链接，需打开 App 核验。"
+        if items
+        else "已检索脉脉公开索引，本轮没有通过相关性检查的内容。"
+    )
+    if errors:
+        summary = f"部分查询失败，已保留其余结果；{summary}"
+    return _coverage(
+        "maimai", status, summary,
+        queries=executed_queries, raw_count=raw_count, relevant_count=len(items), detail_reads=0,
+    ), items
+
+
 def collect_agent_reach(
     *,
     now: datetime | None = None,
     runner: Callable[..., Any] = subprocess.run,
     sleeper: Callable[[float], None] = time.sleep,
+    searcher: Callable[[str, str], list[TrendSignal]] | None = None,
 ) -> dict[str, Any]:
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    searcher = searcher or _default_index_searcher
+    config = _radar_config()
     coverage: list[dict[str, Any]] = []
     items: list[dict[str, Any]] = []
     try:
@@ -569,21 +969,42 @@ def collect_agent_reach(
         ), []
     coverage.append(wechat_coverage)
     items.extend(wechat_items)
-    coverage.extend(
-        (
-            _coverage(
-                "maimai", "unsupported", "当前 OpenCLI 适配器不支持职位或职言搜索。"
+    try:
+        boss_coverage, boss_jobs = _collect_boss(current, runner, sleeper)
+    except ChannelError as exc:
+        boss_coverage, boss_jobs = _coverage(
+            "boss", exc.status,
+            (
+                "本机 BOSS 检索未获取登录态；请在 OpenCLI 完成 boss 登录后重试。"
+                if exc.status == "auth_required"
+                else "本机 BOSS 检索失败，不影响其他渠道。"
             ),
-            _coverage(
-                "boss", "auth_required", "本采集器未读取并验证 BOSS 职位正文，未验活 JD 不输出。"
-            ),
-        )
-    )
+            queries=len(BOSS_CITIES) * len(BOSS_QUERIES),
+        ), []
+    coverage.append(boss_coverage)
+    jobs: list[dict[str, Any]] = list(boss_jobs)
+    try:
+        liepin_coverage, liepin_jobs = _collect_liepin(current, runner, config, searcher)
+    except ChannelError:
+        liepin_coverage, liepin_jobs = _coverage(
+            "liepin", "error", "本机猎聘验活失败，不影响其他渠道。"
+        ), []
+    coverage.append(liepin_coverage)
+    jobs.extend(liepin_jobs)
+    try:
+        maimai_coverage, maimai_items = _collect_maimai(current, config, searcher)
+    except ChannelError:
+        maimai_coverage, maimai_items = _coverage(
+            "maimai", "error", "脉脉公开索引检索失败，不影响其他渠道。"
+        ), []
+    coverage.append(maimai_coverage)
+    items.extend(maimai_items)
     return {
         "schema_version": 1,
         "generated_at": current.isoformat(timespec="seconds"),
         "coverage": coverage,
         "items": items,
+        "jobs": jobs,
     }
 
 

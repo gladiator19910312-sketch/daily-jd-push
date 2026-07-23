@@ -194,7 +194,7 @@ class RadarSupplementTests(unittest.TestCase):
         with self.assertRaises(SupplementValidationError):
             parse_supplement(payload, now=NOW)
 
-    def test_linkedin_requires_direct_detail_and_boss_items_remain_closed(self):
+    def test_linkedin_requires_direct_detail_and_boss_items_require_detail_pages(self):
         payload = valid_payload()
         payload["items"][0]["url"] = "https://www.linkedin.com/jobs/search/"
         with self.assertRaises(SupplementValidationError):
@@ -212,6 +212,9 @@ class RadarSupplementTests(unittest.TestCase):
             "channel": "boss",
             "url": "https://www.zhipin.com/job_detail/abc123.html",
         })
+        # BOSS 已开放：实读证明 + 直达详情页的岗位证据可进入补充包。
+        self.assertTrue(parse_supplement(payload, now=NOW).signals[0].url)
+        payload["items"][0]["url"] = "https://www.zhipin.com/web/geek/job"
         with self.assertRaises(SupplementValidationError):
             parse_supplement(payload, now=NOW)
 
@@ -305,7 +308,115 @@ class RadarSupplementTests(unittest.TestCase):
         signal = bundle.signals[0]
 
         self.assertFalse(hasattr(signal, "official"))
-        self.assertFalse(hasattr(bundle, "jobs"))
+        self.assertEqual(bundle.jobs, ())
+
+
+def _valid_job(**overrides) -> dict:
+    job = {
+        "channel": "boss",
+        "title": "Agent评测产品经理",
+        "company": "美团",
+        "location": "北京·朝阳区",
+        "salary_text": "40-65K·16薪",
+        "description": "负责 Agent 评测体系设计与落地，覆盖工具调用与失败归因。" * 4,
+        "url": "https://www.zhipin.com/job_detail/abc123DEF.html",
+        "observed_at": "2026-07-19T10:50:00+00:00",
+    }
+    job.update(overrides)
+    return job
+
+
+def _jobs_payload(jobs: list[dict]) -> dict:
+    payload = valid_payload()
+    for channel in {job["channel"] for job in jobs}:
+        payload["coverage"].append(
+            {
+                "channel": channel,
+                "status": "ok",
+                "summary": "已完成本机登录态检索与职位正文实读。",
+                "queries": 6,
+                "raw_count": 10,
+                "relevant_count": 3,
+                "detail_reads": 3,
+            }
+        )
+    payload["jobs"] = jobs
+    return payload
+
+
+class SupplementJobContractTests(unittest.TestCase):
+    def test_valid_jobs_accepted(self):
+        bundle = parse_supplement(_jobs_payload([_valid_job()]), now=NOW)
+
+        self.assertEqual(len(bundle.jobs), 1)
+        self.assertEqual(bundle.jobs[0].channel, "boss")
+        self.assertEqual(bundle.jobs[0].salary_text, "40-65K·16薪")
+
+    def test_payload_without_jobs_still_valid(self):
+        bundle = parse_supplement(valid_payload(), now=NOW)
+
+        self.assertEqual(bundle.jobs, ())
+
+    def test_boss_url_must_be_detail_page(self):
+        with self.assertRaises(SupplementValidationError):
+            parse_supplement(
+                _jobs_payload([_valid_job(url="https://www.zhipin.com/web/geek/job")]),
+                now=NOW,
+            )
+
+    def test_job_url_rejects_query_params(self):
+        with self.assertRaises(SupplementValidationError):
+            parse_supplement(
+                _jobs_payload(
+                    [_valid_job(url="https://www.zhipin.com/job_detail/abc123DEF.html?ka=track")]
+                ),
+                now=NOW,
+            )
+
+    def test_liepin_url_pattern(self):
+        job = _valid_job(channel="liepin", url="https://www.liepin.com/job/1977000001.shtml")
+        bundle = parse_supplement(_jobs_payload([job]), now=NOW)
+
+        self.assertEqual(bundle.jobs[0].channel, "liepin")
+
+    def test_sensitive_content_in_job_rejected(self):
+        with self.assertRaises(SupplementValidationError):
+            parse_supplement(
+                _jobs_payload(
+                    [_valid_job(description="正文 xsec_token=abc 必须拒绝，其余字符补齐。" * 4)]
+                ),
+                now=NOW,
+            )
+
+    def test_boss_url_allows_real_world_id_characters(self):
+        job = _valid_job(url="https://www.zhipin.com/job_detail/603e0617d2fcc5dc0nF_2dW6GFZV.html")
+        bundle = parse_supplement(_jobs_payload([job]), now=NOW)
+
+        self.assertTrue(bundle.jobs[0].url)
+
+    def test_short_description_rejected(self):
+        with self.assertRaises(SupplementValidationError):
+            parse_supplement(_jobs_payload([_valid_job(description="太短")]), now=NOW)
+
+    def test_job_count_must_not_exceed_coverage(self):
+        jobs = [
+            _valid_job(),
+            _valid_job(title="另一个 Agent 产品岗位", url="https://www.zhipin.com/job_detail/def456GHI.html"),
+            _valid_job(title="第三个 Agent 产品岗位", url="https://www.zhipin.com/job_detail/ghi789JKL.html"),
+            _valid_job(title="第四个 Agent 产品岗位", url="https://www.zhipin.com/job_detail/jkl012MNO.html"),
+        ]
+        with self.assertRaises(SupplementValidationError):
+            parse_supplement(_jobs_payload(jobs), now=NOW)
+
+    def test_duplicate_job_urls_rejected(self):
+        with self.assertRaises(SupplementValidationError):
+            parse_supplement(_jobs_payload([_valid_job(), _valid_job()]), now=NOW)
+
+    def test_jobs_require_ok_or_partial_coverage(self):
+        payload = _jobs_payload([_valid_job()])
+        payload["coverage"][-1]["status"] = "error"
+        with self.assertRaises(SupplementValidationError):
+            parse_supplement(payload, now=NOW)
 
 
 if __name__ == "__main__":

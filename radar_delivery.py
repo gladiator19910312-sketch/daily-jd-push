@@ -132,6 +132,7 @@ def signal_title_search_url(signal: TrendSignal) -> str:
 
 COVERAGE_LABELS = {
     "boss": "BOSS 直聘",
+    "liepin": "猎聘",
     "linkedin": "LinkedIn",
     "maimai": "脉脉",
     "wechat": "微信公众号",
@@ -531,11 +532,13 @@ def format_action_report(
     failures: list[str],
     *,
     trend_items: list[Assessment] | None = None,
+    platform_items: list[Assessment] | None = None,
     config: dict[str, Any] | None = None,
 ) -> str:
     """Render a concise, click-first report containing only job actions."""
     config = config or {}
     trend_items = trend_items or []
+    platform_items = platform_items or []
     timezone = ZoneInfo(str(config.get("timezone", "Asia/Shanghai")))
     now = datetime.now(timezone)
     lines = [
@@ -586,6 +589,21 @@ def format_action_report(
                 ]
             )
 
+    if platform_items:
+        lines.extend(["## 平台岗位｜BOSS / 猎聘（本机已验活 L2）", ""])
+        for item in platform_items:
+            company = item.job.company or item.job.source
+            lines.extend(
+                [
+                    f"- **{markdown_text(item.job.title)}**｜{markdown_text(company)}｜"
+                    f"{markdown_text(item.job.location)}｜{markdown_text(item.job.source)}",
+                    f"  Fit/Ready {item.fit}/{item.ready}｜薪酬：{markdown_text(_compact(item.salary.label, 40))}｜"
+                    "时效：本轮实读在招，发布日期未披露",
+                    f"  平台信息以企业官网与面试确认为准；先核验：{markdown_text(_joined(item.gaps, '薪酬、权限与生活边界', limit=1, max_chars=56))}",
+                    markdown_link("查看平台岗位详情 →", item.job.url),
+                ]
+            )
+        lines.append("")
     if trend_items:
         lines.extend(["## 行业参考岗位｜其他城市 / 海外", ""])
         for item in trend_items:
@@ -618,6 +636,7 @@ def format_market_report(
     evidence_signals: Sequence[TrendSignal] | None = None,
     source_coverage: Sequence[SupplementCoverage] | None = None,
     failures: Sequence[str] | None = None,
+    platform_job_count: int = 0,
     config: dict[str, Any] | None = None,
 ) -> str:
     """Render cross-source market evidence without treating indexed leads as supply."""
@@ -654,7 +673,11 @@ def format_market_report(
         "## 样本边界与源健康度",
         "",
         f"- **可统计样本：** 本轮仅使用 L1 企业官网完整正文，n={sample_count}，{company_count} 家公司；北京/天津决策样本 {primary_count}",
-        "- **L2 平台正文：** 当前没有达到正文验活标准的自动样本；不与官网样本混算",
+        (
+            f"- **L2 平台正文：** 本轮含本机验活平台岗位 {platform_job_count} 条（BOSS / 猎聘），仅作岗位推送，不进供给统计"
+            if platform_job_count
+            else "- **L2 平台正文：** 当前没有达到正文验活标准的自动样本；不与官网样本混算"
+        ),
         "- **不计入供给统计：** L3 搜索索引线索，L4 公众号 / 小红书 / 行业内容",
         ]
     )

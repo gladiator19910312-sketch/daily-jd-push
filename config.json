@@ -17,6 +17,7 @@
   "max_job_age_days": 180,
   "max_primary_push_jobs": 6,
   "max_trend_push_jobs": 4,
+  "max_platform_jobs_push": 3,
   "max_signal_push_items": 3,
   "max_platform_signal_items": 3,
   "max_content_signal_items": 4,

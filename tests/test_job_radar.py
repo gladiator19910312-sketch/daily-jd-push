@@ -1746,5 +1746,68 @@ class JobRadarTests(unittest.TestCase):
             self.assertEqual(set(state), {"recent"})
 
 
+class PlatformJobFlowTests(unittest.TestCase):
+    CONFIG = {
+        "fit_threshold": 62,
+        "primary_locations": ["北京", "天津"],
+        "current_fixed_cash_wan": 1,
+        "target_total_comp_wan": 1,
+        "usd_cny": 7.0,
+        "preferred_companies": [],
+    }
+
+    def _supplement_jobs(self):
+        from radar_supplement import SupplementJob
+
+        description = (
+            "负责 Agent 评测体系设计与落地：拆解意图理解、多轮规划、工具调用，"
+            "建立端到端产品评测框架；主导评测集设计，推动失败归因与上线闭环。"
+        ) * 2
+        return (
+            SupplementJob(
+                "boss", "Agent评测产品经理", "美团", "北京·朝阳区",
+                "40-65K·16薪", description,
+                "https://www.zhipin.com/job_detail/abc123DEF.html",
+                "2026-07-21T00:10:00+00:00",
+            ),
+            SupplementJob(
+                "boss", "Agent 产品", "某司", "上海·浦东",
+                "40-65K", description,
+                "https://www.zhipin.com/job_detail/zzz999YYY.html",
+                "2026-07-21T00:10:00+00:00",
+            ),
+        )
+
+    def test_assess_platform_jobs_filters_location(self):
+        from job_radar import assess_platform_jobs
+
+        selected = assess_platform_jobs(self._supplement_jobs(), self.CONFIG)
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].job.company, "美团")
+        self.assertEqual(selected[0].job.source, "BOSS直聘（本机验活）")
+        self.assertFalse(selected[0].job.official)
+
+    def test_delivered_seen_identities_includes_platform_bucket(self):
+        from job_radar import assess_platform_jobs
+
+        selected = assess_platform_jobs(self._supplement_jobs(), self.CONFIG)
+        identities = delivered_seen_identities([], [], [], [], selected_platform=selected)
+
+        self.assertIn(f"platform:{selected[0].job.identity}", identities)
+
+
+    def test_failed_agent_reach_coverage_covers_all_five_channels(self):
+        from job_radar import failed_agent_reach_coverage
+
+        rows = failed_agent_reach_coverage("Agent Reach 补充包无效：测试")
+
+        self.assertEqual(
+            {row.channel for row in rows},
+            {"xiaohongshu", "wechat", "maimai", "boss", "liepin"},
+        )
+        self.assertTrue(all(row.status == "error" for row in rows))
+
+
 if __name__ == "__main__":
     unittest.main()

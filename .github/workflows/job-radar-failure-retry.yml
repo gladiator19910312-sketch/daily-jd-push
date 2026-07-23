@@ -1,0 +1,31 @@
+name: Job Radar Failure Retry
+
+# 定时运行失败后的自动补偿：等待 15 分钟（避开钉钉/网络的瞬时故障窗口），
+# 以 workflow_dispatch 重新触发主 workflow。重试运行的 event 是
+# workflow_dispatch，不满足下方 schedule 条件，因此不会形成重试循环；
+# 主 workflow 内的 SKIP_IF_RECENT_PUSH_HOURS=11 保证当天已成功推送时
+# 重试运行会作为"近期已推送"跳过，不产生重复消息。
+
+on:
+  workflow_run:
+    workflows: ["Daily Agent Job Radar"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  retry:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'failure'
+          && github.event.workflow_run.event == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Wait for transient failures to clear
+        run: sleep 900
+
+      - name: Re-dispatch the radar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run daily-job-radar.yml -f dry_run=false -f force_all=false

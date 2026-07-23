@@ -204,11 +204,54 @@ def signals_to_baseline(
     return [signal for signal in signals if signal.source in selected_sources]
 
 
+PLATFORM_SOURCE_LABELS = {
+    "boss": "BOSS直聘（本机验活）",
+    "liepin": "猎聘（本机验活）",
+}
+
+
+def assess_platform_jobs(
+    supplement_jobs: tuple,
+    config: dict[str, Any],
+) -> list[Assessment]:
+    """Turn locally verified platform jobs into assessed candidates."""
+    primary_terms = tuple(str(term) for term in config.get("primary_locations", ("北京", "天津")))
+    assessments: list[Assessment] = []
+    for entry in supplement_jobs:
+        summary = entry.description
+        if entry.salary_text:
+            summary = f"薪酬：{entry.salary_text}\n{entry.description}"
+        job = Job(
+            title=entry.title,
+            url=entry.url,
+            summary=summary,
+            source=PLATFORM_SOURCE_LABELS.get(entry.channel, entry.channel),
+            company=entry.company,
+            location=entry.location,
+            scope="china",
+            official=False,
+            source_key=f"agent-reach-{entry.channel}",
+            active=True,
+            date_basis="unknown",
+        )
+        if primary_terms and not any(term in entry.location for term in primary_terms):
+            continue
+        assessment = assess_job(job, config)
+        if not assessment.eligible:
+            continue
+        if assessment.fit < int(config.get("fit_threshold", 62)):
+            continue
+        assessments.append(assessment)
+    return assessments
+
+
 def delivered_seen_identities(
     selected_primary: list[Assessment],
     selected_trends: list[Assessment],
     signals: list[TrendSignal],
     selected_signals: list[TrendSignal],
+    *,
+    selected_platform: list[Assessment] | tuple[Assessment, ...] = (),
 ) -> set[str]:
     """Persist only jobs the user actually received; keep unshown jobs in rotation."""
     return {
@@ -219,6 +262,7 @@ def delivered_seen_identities(
             for signal in signals_to_baseline(signals, selected_signals)
         ),
         *(f"signal-source:{signal.source}" for signal in selected_signals),
+        *(f"platform:{item.job.identity}" for item in selected_platform),
     }
 
 
@@ -241,11 +285,9 @@ def merge_signals(
 
 def failed_agent_reach_coverage(reason: str) -> tuple[SupplementCoverage, ...]:
     compact = " ".join(reason.split())[:120]
-    return (
-        SupplementCoverage("xiaohongshu", "error", compact),
-        SupplementCoverage("wechat", "error", compact),
-        SupplementCoverage("maimai", "unsupported", "当前适配器不支持职位或职言搜索"),
-        SupplementCoverage("boss", "auth_required", "未验证本机 BOSS 登录态；未实读 JD 不推送"),
+    return tuple(
+        SupplementCoverage(row.channel, "error", compact)
+        for row in default_agent_reach_coverage()
     )
 
 
@@ -306,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         print("近期已有一次成功推送；本轮云端定时任务作为兜底跳过。")
         return 0
     supplement_signals: tuple[TrendSignal, ...] = ()
+    supplement_jobs: tuple = ()
     supplement_coverage = default_agent_reach_coverage()
     supplement_failure = ""
     if args.supplement:
@@ -319,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
             supplement_coverage = failed_agent_reach_coverage(supplement_failure)
         else:
             supplement_signals = supplement.signals
+            supplement_jobs = supplement.jobs
             supplement_coverage = supplement.coverage
     elif args.require_supplement:
         print("要求 Agent Reach 补充包，但没有提供 --supplement", file=sys.stderr)
@@ -382,6 +426,18 @@ def main(argv: list[str] | None = None) -> int:
         platform_limit=platform_signal_limit or None,
         content_limit=content_signal_limit or None,
     )
+    platform_assessments = assess_platform_jobs(supplement_jobs, config)
+    if args.force_all:
+        fresh_platform = platform_assessments
+    else:
+        fresh_platform = [
+            item
+            for item in platform_assessments
+            if not was_seen(seen, "platform", item.job.identity)
+        ]
+    selected_platform = sorted(fresh_platform, key=lambda item: item.fit, reverse=True)[
+        : int(config.get("max_platform_jobs_push", 3))
+    ]
     source_warnings = (
         ([supplement_failure] if supplement_failure else [])
         + signal_failures[:1]
@@ -394,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         len(jobs),
         source_warnings,
         trend_items=selected_trends,
+        platform_items=selected_platform,
         config=config,
     )
     market_report = format_market_report(
@@ -405,6 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         evidence_signals=signals,
         source_coverage=supplement_coverage,
         failures=source_warnings,
+        platform_job_count=len(platform_assessments),
         config=config,
     )
     if args.dry_run:
@@ -427,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
         selected_trends,
         signals,
         selected_signals,
+        selected_platform=selected_platform,
     )
     seen_state.update((identity, observed_at) for identity in observed_identities)
     seen_state[RECENT_PUSH_STATE_KEY] = observed_at
@@ -437,7 +496,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"已推送 {len(selected_primary)} 个北京/天津岗位、"
-        f"{len(selected_trends)} 个趋势岗位和 {len(selected_signals)} 条行业信号。"
+        f"{len(selected_trends)} 个趋势岗位、{len(selected_platform)} 个平台岗位和 "
+        f"{len(selected_signals)} 条行业信号。"
     )
     return 0
 

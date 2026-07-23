@@ -3,8 +3,12 @@ run-name: ${{ inputs.dispatch_id && format('Agent Reach {0}', inputs.dispatch_id
 
 on:
   schedule:
-    # 00:30 UTC = 08:30 Asia/Shanghai
+    # 00:30 UTC = 08:30 Asia/Shanghai（主兜底）
     - cron: "30 0 * * *"
+    # 03:30 UTC = 11:30 Asia/Shanghai（补偿点 1）
+    - cron: "30 3 * * *"
+    # 09:30 UTC = 17:30 Asia/Shanghai（补偿点 2）
+    - cron: "30 9 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -40,7 +44,10 @@ jobs:
     env:
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
       FORCE_ALL: ${{ inputs.force_all || 'false' }}
-      SKIP_IF_RECENT_PUSH_HOURS: ${{ github.event_name == 'schedule' && '2' || '0' }}
+      # 11 小时内已有成功推送则跳过：早晨本机/云端去重靠它，
+      # 11:30 与 17:30 两个补偿点靠它避免重复推送；昨日成功推送距今
+      # 必然超过 11 小时，不会误压次日推送。force_all 可显式绕过。
+      SKIP_IF_RECENT_PUSH_HOURS: '11'
     steps:
       - uses: actions/checkout@v4
 
